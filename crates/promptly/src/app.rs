@@ -837,6 +837,24 @@ impl App {
         }
     }
 
+    /// Pane id from a pane number or a Claude session id.
+    fn resolve_session(&self, session: &str) -> Option<PaneId> {
+        session
+            .parse::<PaneId>()
+            .ok()
+            .filter(|id| self.panes.contains_key(id))
+            .or_else(|| {
+                self.core
+                    .lock()
+                    .sessions
+                    .iter()
+                    .find_map(|(id, m)| match &m.kind {
+                        PaneKind::Claude { session_id } if session_id == session => Some(*id),
+                        _ => None,
+                    })
+            })
+    }
+
     fn on_control(&mut self, req: ControlRequest, resp: promptly_core::ipc::Responder) {
         use serde_json::json;
         match req {
@@ -899,6 +917,15 @@ impl App {
                     .collect();
                 resp.reply(json!({"ok": true, "sessions": list}));
             }
+            ControlRequest::Type { session, text } => match self.resolve_session(&session) {
+                Some(id) => {
+                    if let Some(e) = self.panes.get(&id) {
+                        e.pane.write(text.into_bytes());
+                    }
+                    resp.reply(json!({"ok": true}));
+                }
+                None => resp.reply(json!({"ok": false, "error": "no such session"})),
+            },
             ControlRequest::Focus { session } => {
                 let target = session
                     .parse::<PaneId>()

@@ -22,6 +22,7 @@ USAGE:
   promptly-ctl list
   promptly-ctl focus SESSION
   promptly-ctl action NAME        run a palette action (usage, toggle_grid, new_claude, ...)
+  promptly-ctl type SESSION TEXT  type into a session; \\r is Enter, \\e is Escape
 
 Internal (invoked by Claude Code via injected settings):
   promptly-ctl hook
@@ -45,6 +46,13 @@ fn main() -> ExitCode {
             body: args.get(2).cloned().unwrap_or_default(),
         })),
         Some("list") => control(Ok(ControlRequest::ListSessions)),
+        Some("type") if args.len() == 3 => control(Ok(ControlRequest::Type {
+            session: args[1].clone(),
+            text: args[2]
+                .replace("\\r", "\r")
+                .replace("\\e", "\x1b")
+                .replace("\\n", "\n"),
+        })),
         Some("action") if args.len() == 2 => control(Ok(ControlRequest::Action {
             name: args[1].clone(),
         })),

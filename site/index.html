@@ -286,7 +286,7 @@ footer a { color: var(--label-2); }
         <a class="pill dl-mac" href="https://github.com/martinykiriloff/promptly/releases/latest">Download for Mac</a>
         <a class="more" href="#highlights">See what it does</a>
       </div>
-      <p class="fine"><span class="dl-ver">Latest release</span>. Apple silicon with macOS 14 or later. Also on Linux.</p>
+      <p class="fine"><span class="dl-ver">Latest release</span>. Apple silicon with macOS 14 or later, unsigned for now. Also on Linux.</p>
     </div>
     <div class="shot reveal"><img src="assets/main.png" alt="Promptly with a Claude Code session in the middle, sessions and live usage in the sidebar, and a diff in the review pane" width="1800" height="1125"></div>
   </header>
@@ -417,6 +417,7 @@ footer a { color: var(--label-2); }
         <div class="spec"><dt>Terminal</dt><dd>GPU rendering with Metal and Vulkan. Truecolor, Kitty keyboard protocol, OSC 8 links, bracketed paste, 100,000 lines of searchable scrollback. Shell integration for zsh, bash and fish.</dd></div>
         <div class="spec"><dt>Sessions</dt><dd>Attention queue and notifications, git worktree per session, fan‑out, review with comments, composer, history search and resume, command palette, scripting with <code class="k">promptly-ctl</code>.</dd></div>
         <div class="spec"><dt>Security</dt><dd>Local Unix sockets only, each with a 256‑bit token and peer check. Clipboard reads blocked. Paste preview for hidden characters. Never approves on your behalf.</dd></div>
+        <div class="spec"><dt>License</dt><dd><a href="https://github.com/martinykiriloff/promptly/blob/main/LICENSE.md">FSL-1.1-MIT</a>. Use it, read it, change it. You can't sell a competing product with it, and every version becomes MIT two years after release.</dd></div>
         <div class="spec"><dt>Updates</dt><dd>Updates itself from GitHub Releases. Every download is checked against a published SHA‑256 before install.</dd></div>
       </dl>
     </div>
@@ -432,7 +433,7 @@ footer a { color: var(--label-2); }
           <h3>Mac</h3>
           <p>Apple silicon with macOS 14 or later</p>
           <a class="pill dl-mac" href="https://github.com/martinykiriloff/promptly/releases/latest">Download</a>
-          <span class="alt">Not notarized yet. <a href="#cli">First-launch steps</a></span>
+          <span class="alt">Unsigned for now, notarization is coming. <a href="#cli">One-time first-launch step</a></span>
         </div>
         <div class="plat">
           <h3>Linux</h3>
@@ -461,7 +462,7 @@ cargo build --release --workspace &amp;&amp; ./target/release/promptly</pre>
 <footer>
   <div class="wide">
     <p style="margin:0">Promptly is an independent project and is not affiliated with Anthropic. Claude and Claude Code are trademarks of Anthropic.</p>
-    <div class="row"><span>Promptly</span><span><a href="https://github.com/martinykiriloff/promptly">Source</a>&nbsp;&nbsp;&nbsp;<a href="https://github.com/martinykiriloff/promptly/releases">Releases</a></span></div>
+    <div class="row"><span>Promptly · Source available under <a href="https://github.com/martinykiriloff/promptly/blob/main/LICENSE.md">FSL-1.1-MIT</a></span><span><a href="https://github.com/martinykiriloff/promptly">Source</a>&nbsp;&nbsp;&nbsp;<a href="https://github.com/martinykiriloff/promptly/releases">Releases</a></span></div>
   </div>
 </footer>
 

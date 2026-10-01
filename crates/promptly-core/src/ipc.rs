@@ -50,6 +50,11 @@ pub enum ControlRequest {
         body: String,
     },
     ListSessions,
+    /// Type text into a session, as if from the keyboard. `\r` is Enter.
+    Type {
+        session: String,
+        text: String,
+    },
     /// Run a command-palette action by name, e.g. `usage`, `toggle_review`.
     Action {
         name: String,
