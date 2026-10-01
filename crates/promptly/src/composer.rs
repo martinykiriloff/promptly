@@ -89,6 +89,9 @@ struct ClipImage {
     sig: u64,
 }
 
+/// Slash items for a (cwd, Claude config folder), and when they were read.
+type SlashCache = ((PathBuf, PathBuf), Instant, Arc<Vec<SlashItem>>);
+
 #[derive(Default)]
 pub struct Composer {
     pub text: String,
@@ -96,7 +99,7 @@ pub struct Composer {
     history: Vec<String>,
     history_pos: Option<usize>,
     files: Option<(PathBuf, Arc<Vec<String>>)>,
-    slash_cache: Option<(PathBuf, Instant, Arc<Vec<SlashItem>>)>,
+    slash_cache: Option<SlashCache>,
     popup_sel: usize,
     /// Text the popup was dismissed for (Esc); it reopens when the text changes.
     dismissed_for: Option<String>,
@@ -178,15 +181,16 @@ impl Composer {
         list
     }
 
-    fn slash_items(&mut self, cwd: &Path) -> Arc<Vec<SlashItem>> {
+    fn slash_items(&mut self, cwd: &Path, claude_dir: &Path) -> Arc<Vec<SlashItem>> {
+        let key = (cwd.to_path_buf(), claude_dir.to_path_buf());
         if let Some((d, at, items)) = &self.slash_cache
-            && d == cwd
+            && *d == key
             && at.elapsed() < SLASH_TTL
         {
             return items.clone();
         }
-        let items = Arc::new(commands::discover(cwd, &promptly_core::paths::claude_dir()));
-        self.slash_cache = Some((cwd.to_path_buf(), Instant::now(), items.clone()));
+        let items = Arc::new(commands::discover(cwd, claude_dir));
+        self.slash_cache = Some((key, Instant::now(), items.clone()));
         items
     }
 
@@ -203,12 +207,12 @@ impl Composer {
         last.strip_prefix('@')
     }
 
-    fn popup(&mut self, cwd: &Path) -> Option<Popup> {
+    fn popup(&mut self, cwd: &Path, claude_dir: &Path) -> Option<Popup> {
         if self.dismissed_for.as_deref() == Some(self.text.as_str()) {
             return None;
         }
         if let Some(q) = self.slash_query().map(str::to_owned) {
-            let items = self.slash_items(cwd);
+            let items = self.slash_items(cwd, claude_dir);
             let m: Vec<SlashItem> = commands::filter(&items, &q)
                 .into_iter()
                 .take(60)
@@ -318,6 +322,7 @@ impl Composer {
         &mut self,
         ui: &mut egui::Ui,
         cwd: &Path,
+        claude_dir: &Path,
         snippets: &std::collections::BTreeMap<String, String>,
         target: &str,
     ) -> Option<ComposerAction> {
@@ -329,7 +334,7 @@ impl Composer {
         }
         self.was_focused = focused;
 
-        let popup = self.popup(cwd);
+        let popup = self.popup(cwd, claude_dir);
         let n_items = match &popup {
             Some(Popup::Slash(v)) => v.len(),
             Some(Popup::Files(_, v)) => v.len(),

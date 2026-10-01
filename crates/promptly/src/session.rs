@@ -5,6 +5,7 @@
 //! window never delays a permission alert.
 
 use parking_lot::Mutex;
+use promptly_core::accounts::{self, Account, AccountsFile};
 use promptly_core::attention::{AttentionItem, AttentionQueue, NotifyPolicy};
 use promptly_core::git::Worktree;
 use promptly_core::hooks::HookEvent;
@@ -12,8 +13,9 @@ use promptly_core::ipc::{Incoming, Server};
 use promptly_core::state::{SessionState, StateTracker, Transition};
 use promptly_core::statusline::StatusInfo;
 use promptly_core::transcript::{TranscriptReader, TranscriptStats, TranscriptWatch};
+use promptly_core::usage::AccountUsage;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +33,8 @@ pub enum PaneKind {
 
 pub struct SessionMeta {
     pub kind: PaneKind,
+    /// Id of the Claude account (config folder) this session runs under.
+    pub account: String,
     pub title: String,
     pub cwd: PathBuf,
     pub branch: Option<String>,
@@ -67,6 +71,7 @@ impl SessionMeta {
         }
         Self {
             kind,
+            account: String::new(),
             title: String::new(),
             cwd,
             branch: None,
@@ -141,8 +146,13 @@ pub struct Core {
     /// The pane the user is looking at, if the window has focus.
     pub focused: Option<PaneId>,
     pub log: VecDeque<LogEntry>,
-    /// Plan limits reported by Claude Code, shared by all sessions.
-    pub account: promptly_core::usage::AccountUsage,
+    /// Claude accounts on the machine (one per config folder).
+    pub accounts: Vec<Account>,
+    /// The account new sessions use.
+    pub active_account: String,
+    accounts_file: AccountsFile,
+    /// Plan limits reported by Claude Code, per account id.
+    pub usage: HashMap<String, AccountUsage>,
     /// Today's tokens across every Claude session on the machine.
     pub daily: Option<promptly_core::usage::DailyUsage>,
 }
@@ -160,9 +170,101 @@ impl Core {
             notifications_enabled: true,
             focused: None,
             log: VecDeque::new(),
-            account: promptly_core::usage::AccountUsage::load(),
+            accounts: vec![],
+            active_account: String::new(),
+            accounts_file: AccountsFile::load(),
+            usage: HashMap::new(),
             daily: None,
         }
+        .with_accounts()
+    }
+
+    fn with_accounts(mut self) -> Self {
+        self.refresh_accounts();
+        let inherited = crate::INHERITED_CONFIG_DIR.get();
+        self.active_account = self
+            .accounts_file
+            .active
+            .clone()
+            .filter(|id| self.account(id).is_some())
+            .or_else(|| {
+                let d = inherited?;
+                self.accounts
+                    .iter()
+                    .find(|a| &a.dir == d)
+                    .map(|a| a.id.clone())
+            })
+            .or_else(|| self.accounts.first().map(|a| a.id.clone()))
+            .unwrap_or_default();
+        self
+    }
+
+    /// Re-scan account folders and identities (e.g. after a `/login`).
+    pub fn refresh_accounts(&mut self) {
+        let inherited = crate::INHERITED_CONFIG_DIR.get().map(PathBuf::as_path);
+        self.accounts = accounts::discover(
+            &promptly_core::paths::home(),
+            &self.accounts_file,
+            inherited,
+        );
+        for a in &self.accounts {
+            self.usage
+                .entry(a.id.clone())
+                .or_insert_with(|| AccountUsage::load(a));
+        }
+    }
+
+    pub fn account(&self, id: &str) -> Option<&Account> {
+        self.accounts.iter().find(|a| a.id == id)
+    }
+
+    /// The account new sessions use.
+    pub fn active(&self) -> &Account {
+        self.account(&self.active_account)
+            .or(self.accounts.first())
+            .expect("~/.claude is always an account")
+    }
+
+    pub fn set_active(&mut self, id: &str) {
+        if self.account(id).is_some() {
+            self.active_account = id.to_string();
+            self.accounts_file.active = Some(id.to_string());
+            self.accounts_file.save();
+        }
+    }
+
+    pub fn rename_account(&mut self, id: &str, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.accounts_file.names.remove(id);
+        } else {
+            self.accounts_file.names.insert(id.into(), name.into());
+        }
+        self.accounts_file.save();
+        self.refresh_accounts();
+    }
+
+    /// Position of an account in the list (drives its avatar colour).
+    pub fn account_index(&self, id: &str) -> usize {
+        self.accounts.iter().position(|a| a.id == id).unwrap_or(0)
+    }
+
+    pub fn multi_account(&self) -> bool {
+        self.accounts.len() > 1
+    }
+
+    /// Plan limits for an account (empty until Claude reports them).
+    pub fn usage_of(&self, id: &str) -> &AccountUsage {
+        static EMPTY: std::sync::LazyLock<AccountUsage> =
+            std::sync::LazyLock::new(Default::default);
+        self.usage.get(id).unwrap_or(&EMPTY)
+    }
+
+    /// Short account tag for a session, when there is more than one account.
+    pub fn account_tag(&self, id: &str) -> Option<String> {
+        self.multi_account()
+            .then(|| self.account(id).map(Account::short_label))
+            .flatten()
     }
 
     pub fn log(&mut self, pane: PaneId, kind: &'static str, summary: String) {
@@ -312,6 +414,7 @@ impl ClaudeLink {
                         let info = StatusInfo::parse(&v);
                         let now = promptly_core::usage::now_secs();
                         let limits = info.rate_limits;
+                        let account = c.sessions.get(&pane).map(|m| m.account.clone());
                         if let Some(meta) = c.sessions.get_mut(&pane) {
                             if let Some(cost) = info.cost_usd {
                                 meta.cost_series.push(now as f64, cost);
@@ -321,13 +424,27 @@ impl ClaudeLink {
                             }
                             meta.status = info;
                         }
-                        match limits {
-                            Some(r) => {
-                                let alerts = c.account.observe(r, now);
-                                c.account.save();
+                        match (limits, account.and_then(|id| c.account(&id).cloned())) {
+                            (Some(r), Some(acct)) => {
+                                let tag = c.account_tag(&acct.id);
+                                let u = c
+                                    .usage
+                                    .entry(acct.id.clone())
+                                    .or_insert_with(|| AccountUsage::load(&acct));
+                                let alerts = u.observe(r, now);
+                                u.save(&acct);
                                 alerts.first().map(|a| {
                                     (
-                                        format!("{} limit at {:.0}%", capitalize(a.window), a.used),
+                                        match &tag {
+                                            Some(t) => {
+                                                format!("{t}: {} limit at {:.0}%", a.window, a.used)
+                                            }
+                                            None => format!(
+                                                "{} limit at {:.0}%",
+                                                capitalize(a.window),
+                                                a.used
+                                            ),
+                                        },
                                         format!(
                                             "Crossed {}%. Resets in {}.",
                                             a.threshold,
@@ -336,7 +453,7 @@ impl ClaudeLink {
                                     )
                                 })
                             }
-                            None => None,
+                            _ => None,
                         }
                     }
                     Incoming::Control(..) => None,
@@ -413,6 +530,9 @@ impl ClaudeLink {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPane {
     pub kind: PaneKind,
+    /// Account id; older layouts have none and use the active account.
+    #[serde(default)]
+    pub account: Option<String>,
     pub cwd: PathBuf,
     pub title: String,
     pub worktree: Option<(PathBuf, String, PathBuf)>,

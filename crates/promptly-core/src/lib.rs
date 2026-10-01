@@ -1,6 +1,7 @@
 //! Promptly core: everything that is not pixels. The UI crate renders what
 //! this crate derives; `promptly-ctl` uses its IPC client.
 
+pub mod accounts;
 pub mod attention;
 pub mod commands;
 pub mod config;

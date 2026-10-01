@@ -51,4 +51,16 @@ fn shots() {
         f(h.state_mut());
         render(&mut h, &dir, name);
     }
+    // Open the account switcher (top of the sidebar) with a real click.
+    let at = egui::pos2(150.0, 34.0 + 22.0);
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        });
+        h.step();
+    }
+    render(&mut h, &dir, "13-account-switcher");
 }

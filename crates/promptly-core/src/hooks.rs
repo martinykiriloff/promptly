@@ -192,11 +192,11 @@ impl InjectedSettings {
 
 /// The user's own status line command, so the wrapper can chain to it.
 /// Precedence mirrors Claude Code: project-local, project, user.
-pub fn user_statusline_command(cwd: &Path) -> Option<String> {
+pub fn user_statusline_command(cwd: &Path, claude_dir: &Path) -> Option<String> {
     let candidates = [
         cwd.join(".claude/settings.local.json"),
         cwd.join(".claude/settings.json"),
-        crate::paths::claude_dir().join("settings.json"),
+        claude_dir.join("settings.json"),
     ];
     candidates.iter().find_map(|p| {
         let v: Value = serde_json::from_slice(&std::fs::read(p).ok()?).ok()?;

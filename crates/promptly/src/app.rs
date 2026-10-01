@@ -47,6 +47,8 @@ pub struct NewSession {
     pub worktree: Option<String>,
     pub prompt: Option<String>,
     pub split: Option<bool>,
+    /// Claude account id; `None` uses the active account.
+    pub account: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,9 +82,18 @@ enum Action {
     InstallUpdate,
     ReviewFull,
     ToggleThinking,
+    SwitchAccount,
+    AddAccount,
 }
 
 const ACTIONS: &[(Action, &str, &str, &str)] = &[
+    (
+        Action::SwitchAccount,
+        "switch_account",
+        "Switch Claude account",
+        "primary+shift+a",
+    ),
+    (Action::AddAccount, "add_account", "Add Claude account", ""),
     (
         Action::Palette,
         "palette",
@@ -269,6 +280,10 @@ pub struct App {
     palette: Option<Palette>,
     history: Option<HistoryPicker>,
     fanout: Option<FanOut>,
+    /// Name typed in the "Add account" sheet, while it is open.
+    add_account: Option<String>,
+    /// Last time account identities were re-read (to catch a `/login`).
+    accounts_checked: Instant,
     settings_open: bool,
     log_open: bool,
     transcript_open: bool,
@@ -332,6 +347,15 @@ impl App {
             let index = index.clone();
             let tx = tx.clone();
             let ctx = ctx.clone();
+            let core = core.clone();
+            // History covers every account.
+            let projects = move || -> Vec<PathBuf> {
+                core.lock()
+                    .accounts
+                    .iter()
+                    .map(|a| a.projects_dir())
+                    .collect()
+            };
             std::thread::Builder::new()
                 .name("session index".into())
                 .spawn(move || {
@@ -339,14 +363,19 @@ impl App {
                     let Ok(mut idx) = SessionIndex::open(&db) else {
                         return;
                     };
-                    let _ = idx.refresh(&promptly_core::paths::claude_projects_dir());
+                    for p in projects() {
+                        let _ = idx.refresh(&p);
+                    }
                     *index.lock() = Some(idx);
                     let _ = tx.send(AppEvent::IndexRefreshed);
                     ctx.request_repaint();
                     loop {
                         std::thread::sleep(Duration::from_secs(120));
+                        let dirs = projects();
                         if let Some(idx) = index.lock().as_mut() {
-                            let _ = idx.refresh(&promptly_core::paths::claude_projects_dir());
+                            for p in dirs {
+                                let _ = idx.refresh(&p);
+                            }
                         }
                         let _ = tx.send(AppEvent::IndexRefreshed);
                     }
@@ -362,13 +391,20 @@ impl App {
                 .name("usage scan".into())
                 .spawn(move || {
                     loop {
+                        let dir = core.lock().active().projects_dir();
                         let d = promptly_core::usage::scan_today(
-                            &promptly_core::paths::claude_projects_dir(),
+                            &dir,
                             promptly_core::usage::now_secs(),
                         );
                         core.lock().daily = Some(d);
                         ctx.request_repaint();
-                        std::thread::sleep(Duration::from_secs(30));
+                        // Every 30 s, or right away when the account changes.
+                        for _ in 0..30 {
+                            std::thread::sleep(Duration::from_secs(1));
+                            if core.lock().active().projects_dir() != dir {
+                                break;
+                            }
+                        }
                     }
                 })
                 .ok();
@@ -400,6 +436,8 @@ impl App {
             palette: None,
             history: None,
             fanout: None,
+            add_account: None,
+            accounts_checked: Instant::now(),
             settings_open: false,
             log_open: false,
             transcript_open: false,
@@ -512,6 +550,19 @@ impl App {
             );
         }
         env.insert(promptly_core::env::SESSION.into(), id.to_string());
+        // The account decides which config folder (and login) Claude uses.
+        // Shells get it too, so `claude` typed there matches.
+        let account = {
+            let c = self.core.lock();
+            req.account
+                .as_deref()
+                .and_then(|a| c.account(a))
+                .unwrap_or_else(|| c.active())
+                .clone()
+        };
+        if let Some(dir) = account.env_value() {
+            env.insert(promptly_core::accounts::CONFIG_DIR_ENV.into(), dir);
+        }
         if let Some(ctl) = &self.ctl_path
             && let Some(dir) = ctl.parent()
         {
@@ -572,7 +623,7 @@ impl App {
                 );
                 env.insert(promptly_core::env::TOKEN.into(), token.clone());
                 if self.cfg.claude.wrap_statusline
-                    && let Some(cmd) = hooks::user_statusline_command(&cwd)
+                    && let Some(cmd) = hooks::user_statusline_command(&cwd, &account.dir)
                 {
                     env.insert(promptly_core::env::USER_STATUSLINE.into(), cmd);
                 }
@@ -631,13 +682,12 @@ impl App {
             pane.write(format!("{cmd}\r").into_bytes());
         }
         let transcript = match &kind {
-            PaneKind::Claude { session_id } => {
-                Some(promptly_core::paths::transcript_path_for(&cwd, session_id))
-            }
+            PaneKind::Claude { session_id } => Some(account.transcript_path_for(&cwd, session_id)),
             PaneKind::Shell => None,
         };
         {
             let mut meta = SessionMeta::new(kind.clone(), cwd.clone());
+            meta.account = account.id.clone();
             meta.worktree = worktree;
             meta.hooks_injected = link.is_some();
             meta.transcript_path = transcript.clone();
@@ -1203,6 +1253,19 @@ impl App {
                 self.usage_mode = !self.usage_mode;
                 self.grid_mode = false;
             }
+            Action::SwitchAccount => {
+                let next = {
+                    let c = self.core.lock();
+                    let i = c
+                        .accounts
+                        .iter()
+                        .position(|a| a.id == c.active_account)
+                        .unwrap_or(0);
+                    c.accounts[(i + 1) % c.accounts.len()].id.clone()
+                };
+                self.switch_account(&next);
+            }
+            Action::AddAccount => self.add_account = Some(String::new()),
         }
     }
 
@@ -1256,6 +1319,7 @@ impl App {
                     .filter(|m| m.state() != SessionState::Exited)
                     .map(|m| SavedPane {
                         kind: m.kind.clone(),
+                        account: Some(m.account.clone()),
                         cwd: m.cwd.clone(),
                         title: m.title.clone(),
                         worktree: m
@@ -1289,11 +1353,13 @@ impl App {
                         claude: true,
                         resume: Some(session_id),
                         split,
+                        account: p.account,
                         ..Default::default()
                     },
                     PaneKind::Shell => NewSession {
                         cwd: Some(p.cwd),
                         split,
+                        account: p.account,
                         ..Default::default()
                     },
                 };
@@ -1334,6 +1400,294 @@ impl App {
             .map(|(_, s)| self.ctx.format_shortcut(s))
     }
 
+    fn switch_account(&mut self, id: &str) {
+        let label = {
+            let mut c = self.core.lock();
+            if c.active_account == id {
+                return;
+            }
+            c.set_active(id);
+            c.daily = None;
+            c.active().label()
+        };
+        self.toast(format!(
+            "New sessions use {label}. Running sessions keep their account."
+        ));
+    }
+
+    /// Account picker at the top of the sidebar.
+    fn account_switcher(&mut self, ui: &mut egui::Ui) {
+        use theme::tokens as t;
+        let (active, active_ix, accounts, five) = {
+            let c = self.core.lock();
+            let now = promptly_core::usage::now_secs();
+            let five: Vec<Option<f32>> = c
+                .accounts
+                .iter()
+                .map(|a| c.usage_of(&a.id).current(now).0.map(|w| w.used_percentage))
+                .collect();
+            let ix = c.account_index(&c.active_account);
+            (c.active().clone(), ix, c.accounts.clone(), five)
+        };
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::click());
+        let h = kit::hover_t(ui, &resp);
+        let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(9),
+            if open {
+                t::ACTIVE
+            } else {
+                kit::mix(Color32::TRANSPARENT, t::HOVER, h)
+            },
+        );
+        kit::paint_avatar(
+            ui,
+            egui::pos2(rect.min.x + 22.0, rect.center().y),
+            13.0,
+            active.initial(),
+            active_ix,
+        );
+        let text_x = rect.min.x + 44.0;
+        let max_w = rect.max.x - text_x - 30.0;
+        let title = kit::elide(
+            ui,
+            &active.label(),
+            FontId::proportional(13.0),
+            t::TEXT,
+            max_w,
+        );
+        ui.painter()
+            .galley(egui::pos2(text_x, rect.min.y + 6.0), title, t::TEXT);
+        let sub = match (&active.org, active.signed_in()) {
+            (Some(o), _) => o.clone(),
+            (None, true) => "Personal".to_string(),
+            (None, false) => "Not signed in".to_string(),
+        };
+        let sub = kit::elide(ui, &sub, FontId::proportional(11.5), t::TEXT_3, max_w);
+        ui.painter()
+            .galley(egui::pos2(text_x, rect.min.y + 24.0), sub, t::TEXT_3);
+        kit::paint_icon(
+            ui,
+            egui::Rect::from_center_size(
+                egui::pos2(rect.max.x - 16.0, rect.center().y),
+                egui::vec2(14.0, 14.0),
+            ),
+            Icon::ChevronsUpDown,
+            kit::mix(t::TEXT_3, t::TEXT_1, h),
+        );
+        let sc = self.sc(Action::SwitchAccount);
+        let resp = resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(match &sc {
+                Some(sc) => format!("Switch Claude account ({sc})"),
+                None => "Switch Claude account".into(),
+            });
+        if resp.clicked() {
+            // Pick up logins that happened since the last look.
+            self.core.lock().refresh_accounts();
+        }
+        let mut pick = None;
+        let mut add = false;
+        egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.label(
+                RichText::new("Claude accounts")
+                    .size(11.5)
+                    .strong()
+                    .color(t::TEXT_3),
+            );
+            ui.add_space(2.0);
+            for (i, (a, pct)) in accounts.iter().zip(&five).enumerate() {
+                let (r, resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 42.0),
+                    egui::Sense::click(),
+                );
+                let h = kit::hover_t(ui, &resp);
+                ui.painter().rect_filled(
+                    r,
+                    egui::CornerRadius::same(7),
+                    kit::mix(Color32::TRANSPARENT, t::HOVER, h),
+                );
+                kit::paint_avatar(
+                    ui,
+                    egui::pos2(r.min.x + 18.0, r.center().y),
+                    11.0,
+                    a.initial(),
+                    i,
+                );
+                let x = r.min.x + 36.0;
+                let w = r.max.x - x - 56.0;
+                let g = kit::elide(ui, &a.label(), FontId::proportional(13.0), t::TEXT, w);
+                ui.painter()
+                    .galley(egui::pos2(x, r.min.y + 5.0), g, t::TEXT);
+                let g = kit::elide(ui, &a.detail(), FontId::proportional(11.0), t::TEXT_3, w);
+                ui.painter()
+                    .galley(egui::pos2(x, r.min.y + 23.0), g, t::TEXT_3);
+                if a.id == active.id {
+                    kit::paint_icon(
+                        ui,
+                        egui::Rect::from_center_size(
+                            egui::pos2(r.max.x - 14.0, r.center().y),
+                            egui::vec2(14.0, 14.0),
+                        ),
+                        Icon::Check,
+                        t::ACCENT_HOVER,
+                    );
+                }
+                if let Some(p) = pct {
+                    ui.painter().text(
+                        egui::pos2(r.max.x - 30.0, r.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        format!("{p:.0}%"),
+                        FontId::proportional(11.0),
+                        t::TEXT_3,
+                    );
+                }
+                let tip = format!("{}\nFolder: {}", a.label(), a.dir.display());
+                if resp
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    pick = Some(a.id.clone());
+                    ui.close();
+                }
+            }
+            ui.add_space(2.0);
+            ui.separator();
+            if kit::ghost_button(ui, Icon::UserPlus, "Add account…", None).clicked() {
+                add = true;
+                ui.close();
+            }
+        });
+        if let Some(id) = pick {
+            self.switch_account(&id);
+        }
+        if add {
+            self.run(Action::AddAccount);
+        }
+    }
+
+    /// "Add account" sheet: name it, then sign in from a new session.
+    fn add_account_sheet(&mut self, ctx: &egui::Context) {
+        use theme::tokens as t;
+        let Some(mut name) = self.add_account.take() else {
+            return;
+        };
+        let home = promptly_core::paths::home();
+        let mut create = false;
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("add-account"))
+            .frame(kit::floating_frame().inner_margin(egui::Margin::same(20)))
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(r, egui::CornerRadius::same(8), t::ACCENT.gamma_multiply(0.18));
+                    kit::paint_icon(ui, r.shrink(8.0), Icon::UserPlus, t::ACCENT_HOVER);
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Add a Claude account").size(16.0).strong().color(t::TEXT));
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "Each account gets its own Claude Code folder and sign-in. A new session opens so you can log in.",
+                    )
+                    .size(12.5)
+                    .color(t::TEXT_2),
+                );
+                ui.add_space(14.0);
+                ui.label(RichText::new("Name").size(12.0).color(t::TEXT_2));
+                ui.add_space(4.0);
+                let edit = egui::TextEdit::singleline(&mut name)
+                    .hint_text("work, client, side project…")
+                    .desired_width(f32::INFINITY)
+                    .margin(egui::Margin::symmetric(10, 7))
+                    .font(FontId::proportional(13.5));
+                let resp = ui.add(edit);
+                resp.request_focus();
+                let slug: String = name
+                    .trim()
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                    .collect::<String>()
+                    .split('-')
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("-");
+                ui.add_space(6.0);
+                let exists = !slug.is_empty() && home.join(format!(".claude-{slug}")).exists();
+                let hint = if slug.is_empty() {
+                    "Creates ~/.claude-<name>".to_string()
+                } else if exists {
+                    format!("~/.claude-{slug} already exists")
+                } else {
+                    format!("Creates ~/.claude-{slug}")
+                };
+                ui.label(
+                    RichText::new(hint)
+                        .size(11.5)
+                        .color(if exists { theme::AMBER } else { t::TEXT_3 }),
+                );
+                ui.add_space(18.0);
+                let ok = !slug.is_empty() && !exists;
+                if ok && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    create = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_enabled_ui(ok, |ui| {
+                            if kit::primary_button(ui, None, "Add and sign in", None, false).clicked() {
+                                create = true;
+                            }
+                        });
+                        if kit::secondary_button(ui, None, "Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if modal.should_close() {
+            close = true;
+        }
+        if create {
+            match promptly_core::accounts::create(&home, &name) {
+                Ok(dir) => {
+                    let id = {
+                        let mut c = self.core.lock();
+                        c.refresh_accounts();
+                        let id = c
+                            .accounts
+                            .iter()
+                            .find(|a| a.dir == dir)
+                            .map(|a| a.id.clone());
+                        if let Some(id) = &id {
+                            c.set_active(id);
+                        }
+                        id
+                    };
+                    // Claude Code asks for the theme and sign-in on first run.
+                    self.spawn(NewSession {
+                        claude: true,
+                        account: id,
+                        ..Default::default()
+                    });
+                    self.toast("Sign in with /login if Claude doesn't ask you to.");
+                }
+                Err(e) => {
+                    self.toast(format!("Couldn't add the account: {e}"));
+                    self.add_account = Some(name);
+                }
+            }
+        } else if !close {
+            self.add_account = Some(name);
+        }
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let mut focus = None;
         let mut close = None;
@@ -1344,6 +1698,9 @@ impl App {
         let (strip, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), top), egui::Sense::hover());
         window_drag_zone(ui, strip, "sidebar-drag");
+
+        self.account_switcher(ui);
+        ui.add_space(6.0);
 
         let new_sc = self.sc(Action::NewClaude);
         if kit::new_row(ui, "New Claude session", new_sc.as_deref()).clicked() {
@@ -1459,6 +1816,10 @@ impl App {
                                 _ => "Shell".to_string(),
                             };
                             (format!("{s} · {place}"), None)
+                        };
+                        let subtitle = match c.account_tag(&m.account) {
+                            Some(tag) => format!("{subtitle} · {tag}"),
+                            None => subtitle,
                         };
                         let subtitle = if m.muted {
                             format!("{subtitle} · muted")
@@ -1883,9 +2244,10 @@ impl App {
     fn usage_card(&self, ui: &mut egui::Ui) -> egui::Response {
         use theme::tokens as t;
         let now = promptly_core::usage::now_secs();
-        let (five, week, spend, burn, any_working) = {
+        let (five, week, spend, burn, any_working, tag) = {
             let c = self.core.lock();
-            let (five, week) = c.account.current(now);
+            let (five, week) = c.usage_of(&c.active_account).current(now);
+            let tag = c.account_tag(&c.active_account);
             let spend: f64 = c.sessions.values().filter_map(|m| m.status.cost_usd).sum();
             let burn: f64 = c
                 .sessions
@@ -1896,7 +2258,7 @@ impl App {
                 .sessions
                 .values()
                 .any(|m| m.state() == SessionState::Working);
-            (five, week, spend, burn, working)
+            (five, week, spend, burn, working, tag)
         };
         let reduce = self.reduce_motion;
         let resp = egui::Frame::new()
@@ -1910,6 +2272,10 @@ impl App {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Usage").size(12.5).color(t::TEXT));
+                        if let Some(tag) = &tag {
+                            ui.label(RichText::new(tag).size(11.5).color(t::TEXT_3))
+                                .on_hover_text("Plan limits for the active account");
+                        }
                         if any_working {
                             // Live indicator: a softly pulsing dot while tokens flow.
                             let phase = if reduce {
@@ -1978,10 +2344,11 @@ impl App {
         let reduce = self.reduce_motion;
         let mut focus = None;
         let c = self.core.lock();
-        let (five, week) = c.account.current(now);
-        let five_hist = c.account.five_hour_history.window(nowf, 5.0 * 3600.0);
-        let week_hist = c.account.seven_day_history.window(nowf, 7.0 * 86_400.0);
-        let observed = c.account.observed_at;
+        let usage = c.usage_of(&c.active_account);
+        let (five, week) = usage.current(now);
+        let five_hist = usage.five_hour_history.window(nowf, 5.0 * 3600.0);
+        let week_hist = usage.seven_day_history.window(nowf, 7.0 * 86_400.0);
+        let observed = usage.observed_at;
         let daily = c.daily.clone();
         struct Row {
             id: PaneId,
@@ -2270,6 +2637,11 @@ impl App {
             };
             ui.label(RichText::new(m.display_name()).size(13.5).color(title_col))
                 .on_hover_text(m.cwd.to_string_lossy());
+            if let Some(tag) = c.account_tag(&m.account) {
+                let label = c.account(&m.account).map(|a| a.label()).unwrap_or_default();
+                kit::pill(ui, &tag, kit::avatar_color(c.account_index(&m.account)))
+                    .on_hover_text(format!("Claude account: {label}"));
+            }
             if let Some(b) = &m.branch {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
                 kit::paint_icon(ui, r, Icon::Branch, theme::tokens::TEXT_3);
@@ -2867,6 +3239,7 @@ impl App {
                     } else if h.results.is_empty() {
                         ui.label(RichText::new("No sessions found").color(theme::tokens::TEXT_3));
                     }
+                    let accounts = self.core.lock().accounts.clone();
                     egui::ScrollArea::vertical()
                         .max_height(420.0)
                         .show(ui, |ui| {
@@ -2882,11 +3255,19 @@ impl App {
                                 } else {
                                     rec.first_prompt.as_str()
                                 };
-                                let sub = format!(
+                                let mut sub = format!(
                                     "{}  ·  {date}  ·  {} turns",
                                     short_path(&rec.cwd),
                                     rec.turns
                                 );
+                                if let Some(tag) = accounts
+                                    .iter()
+                                    .find(|a| a.owns(&rec.path))
+                                    .filter(|_| accounts.len() > 1)
+                                    .map(|a| a.short_label())
+                                {
+                                    sub = format!("{sub}  ·  {tag}");
+                                }
                                 if list_item(ui, title, Some(&sub), None, i == h.sel).clicked() {
                                     pick = Some(rec.clone());
                                 }
@@ -2902,10 +3283,19 @@ impl App {
                 self.history = None;
                 let cwd = PathBuf::from(&rec.cwd);
                 if cwd.is_dir() {
+                    // Resume under the account that owns the transcript.
+                    let account = self
+                        .core
+                        .lock()
+                        .accounts
+                        .iter()
+                        .find(|a| a.owns(&rec.path))
+                        .map(|a| a.id.clone());
                     self.spawn(NewSession {
                         cwd: Some(cwd),
                         claude: true,
                         resume: Some(rec.session_id),
+                        account,
                         ..Default::default()
                     });
                 } else {
@@ -3114,6 +3504,7 @@ impl App {
         }
 
         self.settings_window(ctx);
+        self.add_account_sheet(ctx);
         self.log_window(ctx);
         self.transcript_window(ctx);
 
@@ -3141,8 +3532,9 @@ impl App {
         if !self.settings_open {
             return;
         }
-        const SECTIONS: [(Icon, &str); 5] = [
+        const SECTIONS: [(Icon, &str); 6] = [
             (Icon::Sparkle, "Claude"),
+            (Icon::Users, "Accounts"),
             (Icon::Eye, "Appearance"),
             (Icon::Clock, "Notifications"),
             (Icon::Refresh, "Updates"),
@@ -3256,6 +3648,82 @@ impl App {
         }
     }
 
+    fn accounts_section(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        use theme::tokens as t;
+        let (accounts, active) = {
+            let c = self.core.lock();
+            (c.accounts.clone(), c.active_account.clone())
+        };
+        let mut use_id = None;
+        kit::settings_group(ui, Some("On this Mac"), |ui| {
+            for (i, a) in accounts.iter().enumerate() {
+                kit::setting_row(ui, i == 0, &a.label(), &a.detail(), |ui| {
+                    if a.id == active {
+                        kit::pill(ui, "In use", t::ACCENT_HOVER);
+                    } else if kit::secondary_button(ui, None, "Use").clicked() {
+                        use_id = Some(a.id.clone());
+                    }
+                });
+            }
+        });
+        let mut renames = vec![];
+        kit::settings_group(ui, Some("Names"), |ui| {
+            for (i, a) in accounts.iter().enumerate() {
+                let folder = a
+                    .dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                kit::setting_row(
+                    ui,
+                    i == 0,
+                    &format!("~/{folder}"),
+                    "Shown on sessions and in the switcher.",
+                    |ui| {
+                        let key = egui::Id::new(("account-name", &a.id));
+                        let mut buf = ui
+                            .data(|d| d.get_temp::<String>(key))
+                            .unwrap_or_else(|| a.name.clone().unwrap_or_default());
+                        let mut auto = a.clone();
+                        auto.name = None;
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut buf)
+                                .hint_text(auto.short_label())
+                                .desired_width(170.0)
+                                .margin(egui::Margin::symmetric(8, 5)),
+                        );
+                        if resp.lost_focus() && buf.trim() != a.name.clone().unwrap_or_default() {
+                            renames.push((a.id.clone(), buf.clone()));
+                        }
+                        ui.data_mut(|d| d.insert_temp(key, buf));
+                    },
+                );
+            }
+        });
+        ui.horizontal(|ui| {
+            if kit::secondary_button(ui, Some(Icon::UserPlus), "Add account…").clicked() {
+                actions.push(Action::AddAccount);
+            }
+        });
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(
+                "Each account is a Claude Code folder with its own sign-in, settings, skills and history. New sessions use the account in use; running sessions keep theirs.",
+            )
+            .size(11.5)
+            .color(t::TEXT_3),
+        );
+        if !renames.is_empty() {
+            let mut c = self.core.lock();
+            for (id, name) in renames {
+                c.rename_account(&id, &name);
+            }
+        }
+        if let Some(id) = use_id {
+            self.switch_account(&id);
+        }
+    }
+
     fn settings_section(&mut self, ui: &mut egui::Ui, tab: usize, actions: &mut Vec<Action>) {
         use theme::tokens as t;
         match tab {
@@ -3357,7 +3825,8 @@ impl App {
                 });
                 ui.data_mut(|d| d.insert_temp(open_id, open));
             }
-            1 => {
+            1 => self.accounts_section(ui, actions),
+            2 => {
                 kit::settings_group(ui, Some("Terminal"), |ui| {
                     kit::setting_row(ui, true, "Font size", "", |ui| {
                         kit::stepper(ui, &mut self.font_size, 8.0..=32.0, " pt")
@@ -3391,7 +3860,7 @@ impl App {
                     theme::apply_chrome(ui.ctx(), self.high_contrast);
                 }
             }
-            2 => {
+            3 => {
                 let mut c = self.core.lock();
                 kit::settings_group(ui, None, |ui| {
                     kit::setting_row(
@@ -3410,7 +3879,7 @@ impl App {
                     );
                 });
             }
-            3 => {
+            4 => {
                 let status = match &*self.update.lock() {
                     UpdateState::Checking => "Checking…".to_string(),
                     UpdateState::UpToDate => "Promptly is up to date.".to_string(),
@@ -3604,6 +4073,12 @@ impl eframe::App for App {
         self.process_events();
         let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         self.core.lock().focused = if window_focused { self.active } else { None };
+        // Re-read account identities now and then, so a `/login` in a new
+        // account shows its email without a restart.
+        if self.accounts_checked.elapsed() > Duration::from_secs(15) {
+            self.accounts_checked = Instant::now();
+            self.core.lock().refresh_accounts();
+        }
         if self.last_poll.elapsed() > Duration::from_secs(5) {
             self.last_poll = Instant::now();
             // Follow each session's live folder (cd in a shell, Claude moving
@@ -3625,7 +4100,7 @@ impl eframe::App for App {
             }
         }
         // Reset countdowns in the usage card tick every second.
-        if self.core.lock().account.limits.is_some() {
+        if self.core.lock().usage.values().any(|u| u.limits.is_some()) {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         // Keep elapsed timers ticking while something is working.
@@ -3765,22 +4240,28 @@ impl eframe::App for App {
                         }),
                 )
                 .show(ui, |ui| {
-                    let (cwd, target) = self
-                        .active
-                        .and_then(|id| {
-                            self.core
-                                .lock()
-                                .sessions
-                                .get(&id)
-                                .map(|m| (m.cwd.clone(), m.display_name()))
-                        })
-                        .unwrap_or_else(|| (promptly_core::paths::home(), "no session".into()));
+                    let (cwd, target, claude_dir) = {
+                        let c = self.core.lock();
+                        let m = self.active.and_then(|id| c.sessions.get(&id));
+                        let dir = m
+                            .and_then(|m| c.account(&m.account))
+                            .unwrap_or_else(|| c.active())
+                            .dir
+                            .clone();
+                        match m {
+                            Some(m) => (m.cwd.clone(), m.display_name(), dir),
+                            None => (promptly_core::paths::home(), "no session".into(), dir),
+                        }
+                    };
                     let send_sc = self.sc(Action::ToggleComposer);
                     let _ = send_sc;
-                    match self
-                        .composer
-                        .show(ui, &cwd, &self.cfg.snippets.clone(), &target)
-                    {
+                    match self.composer.show(
+                        ui,
+                        &cwd,
+                        &claude_dir,
+                        &self.cfg.snippets.clone(),
+                        &target,
+                    ) {
                         Some(ComposerAction::Send { text, attachments }) => {
                             if let Some(id) = self.active {
                                 self.send_message(id, &text, &attachments);
@@ -3975,6 +4456,48 @@ pub fn shot_scenes() -> Vec<Scene> {
             a.palette = None;
             a.settings_open = true;
         }),
+        ("09-accounts-settings", |a| {
+            a.ctx
+                .data_mut(|d| d.insert_temp(egui::Id::new("settings-tab"), 1usize));
+        }),
+        ("10-add-account", |a| {
+            a.settings_open = false;
+            a.add_account = Some("Client".into());
+        }),
+        ("11-second-account-shell", |a| {
+            a.add_account = None;
+            a.usage_mode = false;
+            let other = a
+                .core
+                .lock()
+                .accounts
+                .iter()
+                .find(|x| !x.is_home)
+                .map(|x| x.id.clone());
+            if let Some(id) = a.spawn(NewSession {
+                cwd: Some("/tmp".into()),
+                account: other,
+                ..Default::default()
+            }) && let Some(e) = a.panes.get(&id)
+            {
+                e.pane.write(
+                    b"clear; echo \"CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-<unset>}\"\r".to_vec(),
+                );
+            }
+        }),
+        ("12-home-account-shell", |a| {
+            let home = a.core.lock().accounts[0].id.clone();
+            if let Some(id) = a.spawn(NewSession {
+                cwd: Some("/tmp".into()),
+                account: Some(home),
+                ..Default::default()
+            }) && let Some(e) = a.panes.get(&id)
+            {
+                e.pane.write(
+                    b"clear; echo \"CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-<unset>}\"\r".to_vec(),
+                );
+            }
+        }),
     ]
 }
 
@@ -4011,13 +4534,13 @@ impl Prefs {
     }
 }
 
-/// Lets the user move the window by dragging empty chrome (needed with the
-/// unified macOS title bar). Double-click zooms, like a native title bar.
 /// Settings-row control: a switch bound to `on`; yields whether it changed.
 fn switch(on: &mut bool) -> impl FnOnce(&mut egui::Ui) -> bool + '_ {
     move |ui| kit::toggle_switch(ui, on).changed()
 }
 
+/// Lets the user move the window by dragging empty chrome (needed with the
+/// unified macOS title bar). Double-click zooms, like a native title bar.
 fn window_drag_zone(
     ui: &mut egui::Ui,
     rect: egui::Rect,

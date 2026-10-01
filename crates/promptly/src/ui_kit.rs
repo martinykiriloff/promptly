@@ -42,6 +42,9 @@ pub enum Icon {
     FileText,
     Film,
     File,
+    ChevronsUpDown,
+    UserPlus,
+    Users,
 }
 
 impl Icon {
@@ -75,6 +78,9 @@ impl Icon {
             Icon::FileText => 0xe0cc,
             Icon::Film => 0xe0d0,
             Icon::File => 0xe0c0,
+            Icon::ChevronsUpDown => 0xe211,
+            Icon::UserPlus => 0xe470,
+            Icon::Users => 0xe472,
         };
         char::from_u32(code).unwrap_or('?')
     }
@@ -583,6 +589,32 @@ pub fn stepper(
         t::TEXT,
     );
     changed
+}
+
+/// Colour for an account avatar, by the account's position in the list.
+pub fn avatar_color(index: usize) -> Color32 {
+    const PALETTE: [Color32; 6] = [
+        Color32::from_rgb(0xc9, 0x6a, 0x4a),
+        Color32::from_rgb(0x4c, 0x8d, 0xf6),
+        Color32::from_rgb(0x3f, 0xa8, 0x6b),
+        Color32::from_rgb(0x9b, 0x6c, 0xd8),
+        Color32::from_rgb(0x2f, 0xa9, 0xb3),
+        Color32::from_rgb(0xc8, 0x8a, 0x2a),
+    ];
+    PALETTE[index % PALETTE.len()]
+}
+
+/// Round initial avatar.
+pub fn paint_avatar(ui: &Ui, center: egui::Pos2, radius: f32, initial: char, index: usize) {
+    let c = avatar_color(index);
+    ui.painter().circle_filled(center, radius, c);
+    ui.painter().text(
+        center,
+        Align2::CENTER_CENTER,
+        initial,
+        FontId::proportional(radius * 1.05),
+        Color32::WHITE,
+    );
 }
 
 /// Round send button (arrow up), accent when enabled.

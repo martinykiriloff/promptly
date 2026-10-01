@@ -17,6 +17,12 @@ mod term_view;
 mod theme;
 mod ui_kit;
 
+/// `CLAUDE_CONFIG_DIR` Promptly was launched with, if any. It is removed from
+/// Promptly's own environment so each session gets exactly its account's
+/// value (and the default account gets none).
+pub static INHERITED_CONFIG_DIR: std::sync::OnceLock<std::path::PathBuf> =
+    std::sync::OnceLock::new();
+
 const INHERITED_CLAUDE_MARKERS: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_PID",
@@ -32,6 +38,9 @@ const INHERITED_CLAUDE_MARKERS: &[&str] = &[
 ];
 
 fn main() -> eframe::Result<()> {
+    if let Some(d) = std::env::var_os(promptly_core::accounts::CONFIG_DIR_ENV) {
+        let _ = INHERITED_CONFIG_DIR.set(d.into());
+    }
     // Children must not inherit a stale TERM from whatever launched us.
     // SAFETY: called before any threads are spawned.
     unsafe {
@@ -43,6 +52,7 @@ fn main() -> eframe::Result<()> {
         for k in INHERITED_CLAUDE_MARKERS {
             std::env::remove_var(k);
         }
+        std::env::remove_var(promptly_core::accounts::CONFIG_DIR_ENV);
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

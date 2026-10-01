@@ -94,12 +94,23 @@ pub struct LimitAlert {
 pub const ALERT_THRESHOLDS: [u8; 2] = [80, 95];
 
 impl AccountUsage {
-    fn path() -> PathBuf {
-        crate::paths::data_dir().join("usage.json")
+    /// `usage.json` for the default account (as before accounts existed),
+    /// `usage-<hash>.json` for the others.
+    fn path(account: &crate::accounts::Account) -> PathBuf {
+        let name = if account.is_home {
+            "usage.json".to_string()
+        } else {
+            // FNV-1a: stable across Rust versions, unlike DefaultHasher.
+            let h = account.id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+                (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+            });
+            format!("usage-{h:016x}.json")
+        };
+        crate::paths::data_dir().join(name)
     }
 
-    pub fn load() -> Self {
-        let mut u: Self = std::fs::read(Self::path())
+    pub fn load(account: &crate::accounts::Account) -> Self {
+        let mut u: Self = std::fs::read(Self::path(account))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
@@ -115,9 +126,9 @@ impl AccountUsage {
         u
     }
 
-    pub fn save(&self) {
+    pub fn save(&self, account: &crate::accounts::Account) {
         if let Ok(b) = serde_json::to_vec(self) {
-            let p = Self::path();
+            let p = Self::path(account);
             if let Some(d) = p.parent() {
                 let _ = std::fs::create_dir_all(d);
             }

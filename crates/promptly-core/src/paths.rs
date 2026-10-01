@@ -58,14 +58,17 @@ pub fn claude_projects_dir() -> PathBuf {
 /// Claude Code stores transcripts under a directory named after the cwd with
 /// every non-alphanumeric character replaced by `-`.
 pub fn transcript_path_for(cwd: &Path, session_id: &str) -> PathBuf {
+    transcript_path_in(&claude_projects_dir(), cwd, session_id)
+}
+
+/// [`transcript_path_for`] under a specific account's `projects` folder.
+pub fn transcript_path_in(projects: &Path, cwd: &Path, session_id: &str) -> PathBuf {
     let encoded: String = cwd
         .to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    claude_projects_dir()
-        .join(encoded)
-        .join(format!("{session_id}.jsonl"))
+    projects.join(encoded).join(format!("{session_id}.jsonl"))
 }
 
 pub fn home() -> PathBuf {
