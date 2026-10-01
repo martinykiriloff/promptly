@@ -54,6 +54,8 @@ pub struct SessionMeta {
     /// Cumulative cost (USD) and tokens over time, for burn rates and sparklines.
     pub cost_series: promptly_core::usage::Series,
     pub token_series: promptly_core::usage::Series,
+    /// Claude's process, newest last: prompts, thinking, tool calls, replies.
+    pub steps: VecDeque<promptly_core::transcript::Step>,
 }
 
 impl SessionMeta {
@@ -85,6 +87,7 @@ impl SessionMeta {
             change_seq: 0,
             cost_series: promptly_core::usage::Series::with_cap(2000),
             token_series: promptly_core::usage::Series::with_cap(2000),
+            steps: VecDeque::new(),
         }
     }
 
@@ -145,6 +148,8 @@ pub struct Core {
 }
 
 const LOG_CAP: usize = 2000;
+/// Steps kept per session for the thinking panel.
+const MAX_STEPS: usize = 400;
 
 impl Core {
     pub fn new() -> Self {
@@ -363,6 +368,7 @@ impl ClaudeLink {
                             continue 'outer;
                         }
                         let activity = reader.poll().ok().flatten();
+                        let got_steps: bool;
                         let note = {
                             let mut c = core.lock();
                             let Some(meta) = c.sessions.get_mut(&pane) else {
@@ -371,13 +377,19 @@ impl ClaudeLink {
                             if meta.stats != reader.stats {
                                 meta.stats = reader.stats.clone();
                             }
+                            let new_steps = reader.take_steps();
+                            got_steps = !new_steps.is_empty();
+                            meta.steps.extend(new_steps);
+                            while meta.steps.len() > MAX_STEPS {
+                                meta.steps.pop_front();
+                            }
                             let tr = activity.and_then(|a| meta.tracker.on_transcript(a));
                             c.apply(pane, tr)
                         };
                         if let Some((title, body)) = note {
                             crate::notify::send(title, body, Some(pane), tx.clone(), ctx.clone());
                         }
-                        if activity.is_some() {
+                        if activity.is_some() || got_steps {
                             ctx.request_repaint();
                         }
                         match &watch {

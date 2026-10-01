@@ -79,6 +79,7 @@ enum Action {
     CheckUpdates,
     InstallUpdate,
     ReviewFull,
+    ToggleThinking,
 }
 
 const ACTIONS: &[(Action, &str, &str, &str)] = &[
@@ -203,6 +204,12 @@ const ACTIONS: &[(Action, &str, &str, &str)] = &[
     ),
     (Action::Usage, "usage", "Usage dashboard", "primary+u"),
     (
+        Action::ToggleThinking,
+        "toggle_thinking",
+        "Show Claude's thinking",
+        "primary+shift+k",
+    ),
+    (
         Action::ReviewFull,
         "review_full",
         "Review all changes (full width)",
@@ -268,6 +275,9 @@ pub struct App {
     grid_mode: bool,
     usage_mode: bool,
     reduce_motion: bool,
+    /// Off by default: show Claude's thinking (Settings › Claude).
+    show_thinking: bool,
+    thinking_open: bool,
     update: Arc<Mutex<UpdateState>>,
     paste_review: Option<(PaneId, String)>,
     restore: Option<SavedLayout>,
@@ -394,6 +404,8 @@ impl App {
             grid_mode: false,
             usage_mode: false,
             reduce_motion: false,
+            show_thinking: false,
+            thinking_open: false,
             update: Arc::new(Mutex::new(UpdateState::Idle)),
             paste_review: None,
             restore,
@@ -409,6 +421,15 @@ impl App {
             option_as_meta: false,
             high_contrast: false,
         };
+        let prefs = Prefs::load();
+        app.show_thinking = prefs.show_thinking;
+        app.thinking_open = prefs.show_thinking && prefs.thinking_open;
+        app.reduce_motion = prefs.reduce_motion;
+        app.option_as_meta = prefs.option_as_meta;
+        app.high_contrast = prefs.high_contrast;
+        if app.high_contrast {
+            theme::apply_chrome(&app.ctx, true);
+        }
         if app.ctl_path.is_none() {
             app.toast("promptly-ctl not found next to the app: running in transcript-only mode");
         }
@@ -1037,6 +1058,14 @@ impl App {
                 self.review_open = !self.review_open;
                 self.review_full = false;
             }
+            Action::ToggleThinking => {
+                if self.show_thinking {
+                    self.thinking_open = !self.thinking_open;
+                    self.save_prefs();
+                } else {
+                    self.toast("Turn on “Show Claude's thinking” in Settings first");
+                }
+            }
             Action::ReviewFull => {
                 self.review_open = true;
                 self.review_full = !self.review_full;
@@ -1379,9 +1408,27 @@ impl App {
                             .branch
                             .clone()
                             .unwrap_or_else(|| short_path(&m.cwd.to_string_lossy()));
+                        // While working, the latest thought replaces the folder.
+                        let thought = (self.show_thinking && m.state() == SessionState::Working)
+                            .then(|| {
+                                m.steps
+                                    .iter()
+                                    .rev()
+                                    .take_while(|s| {
+                                        s.kind != promptly_core::transcript::StepKind::Prompt
+                                    })
+                                    .find(|s| {
+                                        s.kind == promptly_core::transcript::StepKind::Thinking
+                                    })
+                            })
+                            .flatten()
+                            .map(|s| sanitize::one_line(&s.text, 90));
                         let (subtitle, trailing) = if m.is_claude() {
                             (
-                                format!("{} · {place}", kit::state_label(m.state())),
+                                match thought {
+                                    Some(t) => format!("Thinking: {t}"),
+                                    None => format!("{} · {place}", kit::state_label(m.state())),
+                                },
                                 m.status.cost_usd.map(|c| format!("${c:.2}")),
                             )
                         } else {
@@ -1511,6 +1558,185 @@ impl App {
         for a in actions {
             self.run(a);
         }
+    }
+
+    fn save_prefs(&self) {
+        Prefs {
+            show_thinking: self.show_thinking,
+            thinking_open: self.thinking_open,
+            reduce_motion: self.reduce_motion,
+            option_as_meta: self.option_as_meta,
+            high_contrast: self.high_contrast,
+        }
+        .save();
+    }
+
+    /// Claude's process for the active session: what it thought, did and said.
+    fn thinking_ui(&mut self, ui: &mut egui::Ui) {
+        use promptly_core::transcript::StepKind;
+        use theme::tokens as t;
+        let lavender = egui::Color32::from_rgb(0xa9, 0x9c, 0xf7);
+        let (steps, name, working, is_claude) = self
+            .active
+            .and_then(|id| {
+                self.core.lock().sessions.get(&id).map(|m| {
+                    (
+                        m.steps.iter().cloned().collect::<Vec<_>>(),
+                        m.display_name(),
+                        m.state() == SessionState::Working,
+                        m.is_claude(),
+                    )
+                })
+            })
+            .unwrap_or_default();
+
+        // Header.
+        let (hrect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::hover());
+        ui.painter().line_segment(
+            [hrect.left_bottom(), hrect.right_bottom()],
+            egui::Stroke::new(1.0, t::BORDER),
+        );
+        let mut h = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(hrect.shrink2(egui::vec2(12.0, 0.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        h.label(RichText::new("Thinking").size(14.0).color(t::TEXT));
+        if working {
+            let phase = if self.reduce_motion {
+                1.0
+            } else {
+                (h.input(|i| i.time) * 2.4).sin() as f32 * 0.35 + 0.65
+            };
+            let (r, _) = h.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+            h.painter()
+                .circle_filled(r.center(), 3.5, lavender.gamma_multiply(phase));
+            h.ctx().request_repaint_after(Duration::from_millis(50));
+        }
+        let g = kit::elide(
+            &h,
+            &name,
+            egui::FontId::proportional(12.0),
+            t::TEXT_3,
+            h.available_width() - 40.0,
+        );
+        h.label(g);
+        h.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if kit::icon_button(ui, Icon::Close, "Hide thinking", false).clicked() {
+                self.thinking_open = false;
+                self.save_prefs();
+            }
+        });
+
+        if !is_claude {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("Select a Claude session to see its thinking.").color(t::TEXT_3),
+                );
+            });
+            return;
+        }
+        if steps.is_empty() {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(300.0);
+                ui.label(RichText::new("Nothing yet").size(15.0).color(t::TEXT_1));
+                ui.label(
+                    RichText::new(
+                        "Claude's reasoning appears here as it works, alongside the tools it runs.",
+                    )
+                    .size(12.5)
+                    .color(t::TEXT_3),
+                );
+            });
+            return;
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("thinking-scroll")
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let mut hidden_run = 0usize;
+                    let flush_hidden = |ui: &mut egui::Ui, n: &mut usize| {
+                        if *n > 0 {
+                            ui.label(
+                                RichText::new(if *n == 1 { "Thought without a summary".to_string() } else { format!("Thought {n} times without a summary") })
+                                    .size(12.0)
+                                    .italics()
+                                    .color(t::TEXT_3),
+                            )
+                            .on_hover_text("This model or Claude Code version didn't include the thinking text in the transcript.");
+                            ui.add_space(6.0);
+                            *n = 0;
+                        }
+                    };
+                    for s in &steps {
+                        if s.kind == StepKind::ThinkingHidden {
+                            hidden_run += 1;
+                            continue;
+                        }
+                        flush_hidden(ui, &mut hidden_run);
+                        match s.kind {
+                            StepKind::Prompt => {
+                                ui.add_space(8.0);
+                                egui::Frame::new()
+                                    .fill(t::BG_ELEVATED)
+                                    .corner_radius(egui::CornerRadius::same(10))
+                                    .inner_margin(egui::Margin::symmetric(12, 8))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.label(RichText::new("You").size(11.5).color(t::TEXT_3));
+                                        ui.label(RichText::new(sanitize::one_line(&s.text, 400)).size(13.0).color(t::TEXT));
+                                    });
+                                ui.add_space(8.0);
+                            }
+                            StepKind::Thinking => {
+                                let resp = egui::Frame::new()
+                                    .inner_margin(egui::Margin { left: 12, right: 0, top: 2, bottom: 2 })
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.label(RichText::new("Thinking").size(11.5).color(lavender));
+                                        ui.label(RichText::new(&s.text).size(13.0).italics().color(t::TEXT_1));
+                                    })
+                                    .response;
+                                let r = resp.rect;
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(r.min, egui::vec2(3.0, r.height())),
+                                    egui::CornerRadius::same(2),
+                                    lavender.gamma_multiply(0.7),
+                                );
+                                ui.add_space(8.0);
+                            }
+                            StepKind::Tool => {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.label(RichText::new("⏺").size(11.0).color(theme::GREEN));
+                                    ui.add(egui::Label::new(RichText::new(&s.text).monospace().size(12.0).color(t::TEXT_2)).truncate());
+                                });
+                                ui.add_space(4.0);
+                            }
+                            StepKind::Reply => {
+                                ui.add_space(4.0);
+                                ui.label(RichText::new("Claude").size(11.5).color(t::TEXT_3));
+                                let text = if s.text.chars().count() > 900 {
+                                    format!("{}…", s.text.chars().take(900).collect::<String>())
+                                } else {
+                                    s.text.clone()
+                                };
+                                ui.label(RichText::new(text).size(13.0).color(t::TEXT_1));
+                                ui.add_space(8.0);
+                            }
+                            StepKind::ThinkingHidden => {}
+                        }
+                    }
+                    flush_hidden(ui, &mut hidden_run);
+                });
+            });
     }
 
     /// The review pane, docked on the right or full width like a PR page.
@@ -2042,6 +2268,13 @@ impl App {
                 }
                 if kit::icon_button(ui, Icon::Search, "Find in scrollback", false).clicked() {
                     actions.push(Action::Search);
+                }
+                if self.show_thinking
+                    && m.is_claude()
+                    && kit::icon_button(ui, Icon::Thought, "Claude's thinking", self.thinking_open)
+                        .clicked()
+                {
+                    actions.push(Action::ToggleThinking);
                 }
                 if !m.is_claude() {
                     return;
@@ -2876,6 +3109,12 @@ impl App {
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         let mut actions = vec![];
+        let before = (
+            self.show_thinking,
+            self.reduce_motion,
+            self.option_as_meta,
+            self.high_contrast,
+        );
         egui::Window::new("Settings").open(&mut open).default_width(560.0).show(ctx, |ui| {
             ui.heading("Claude");
             if self.hooks_locked {
@@ -2883,6 +3122,13 @@ impl App {
             }
             ui.checkbox(&mut self.cfg.claude.inject_hooks, "Inject session-scoped hooks (applies to new sessions)");
             ui.checkbox(&mut self.cfg.claude.wrap_statusline, "Wrap the status line to read cost and context % (chains to your own)");
+            if ui
+                .checkbox(&mut self.show_thinking, "Show Claude's thinking")
+                .on_hover_text("Adds a Thinking panel with Claude's reasoning, tool calls and replies, and shows the latest thought in the sidebar while a session works.")
+                .changed()
+            {
+                self.thinking_open = self.show_thinking;
+            }
             ui.collapsing("Injected hooks", |ui| {
                 ui.label("Passed with --settings for each session. Your ~/.claude/settings.json is never modified; your own hooks keep running.");
                 let json = match &self.ctl_path {
@@ -2946,6 +3192,16 @@ impl App {
             });
         });
         self.settings_open = open;
+        if before
+            != (
+                self.show_thinking,
+                self.reduce_motion,
+                self.option_as_meta,
+                self.high_contrast,
+            )
+        {
+            self.save_prefs();
+        }
         for a in actions {
             self.run(a);
         }
@@ -3137,6 +3393,20 @@ impl eframe::App for App {
                     }),
             )
             .show(ui, |ui| self.sidebar(ui));
+
+        if self.show_thinking
+            && self.thinking_open
+            && !self.grid_mode
+            && !self.usage_mode
+            && !(self.review_open && self.review_full)
+        {
+            egui::Panel::right("thinking")
+                .resizable(true)
+                .default_size(380.0)
+                .size_range(280.0..=720.0)
+                .frame(egui::Frame::new().fill(t::BG_SIDEBAR))
+                .show(ui, |ui| self.thinking_ui(ui));
+        }
 
         if self.review_open && !self.review_full && !self.grid_mode && !self.usage_mode {
             egui::Panel::right("review")
@@ -3336,6 +3606,38 @@ fn install_update(
             exe,
         }),
         Err(e) => set(UpdateState::Failed(e)),
+    }
+}
+
+/// Interface preferences changed from Settings, remembered between launches.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Prefs {
+    show_thinking: bool,
+    thinking_open: bool,
+    reduce_motion: bool,
+    option_as_meta: bool,
+    high_contrast: bool,
+}
+
+impl Prefs {
+    fn path() -> PathBuf {
+        promptly_core::paths::data_dir().join("prefs.json")
+    }
+    fn load() -> Self {
+        std::fs::read(Self::path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+    fn save(&self) {
+        if let Ok(b) = serde_json::to_vec_pretty(self) {
+            let p = Self::path();
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = promptly_core::util::write_private(&p, &b);
+        }
     }
 }
 

@@ -118,6 +118,112 @@ impl TranscriptStats {
     }
 }
 
+/// One step of Claude's process, in order: what you asked, what it thought,
+/// what it did, what it said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepKind {
+    Prompt,
+    Thinking,
+    /// Claude thought, but the text isn't in the transcript (the model or
+    /// CLI version didn't return it).
+    ThinkingHidden,
+    Tool,
+    Reply,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    pub kind: StepKind,
+    pub text: String,
+    /// RFC 3339 timestamp from the transcript, when present.
+    pub at: Option<String>,
+}
+
+/// Steps contained in one transcript line. Sub-agent (sidechain) lines and
+/// tool results are skipped; they belong to other views.
+pub fn steps_from_line(v: &Value) -> Vec<Step> {
+    if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        return vec![];
+    }
+    let at = v
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let step = |kind, text: String| Step {
+        kind,
+        text,
+        at: at.clone(),
+    };
+    let content = &v["message"]["content"];
+    match v.get("type").and_then(Value::as_str) {
+        Some("user") => {
+            let is_tool_result = content.as_array().is_some_and(|a| {
+                a.iter()
+                    .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+            });
+            if is_tool_result {
+                return vec![];
+            }
+            message_text(content)
+                .and_then(|t| clean_prompt(&t))
+                .map(|t| vec![step(StepKind::Prompt, t)])
+                .unwrap_or_default()
+        }
+        Some("assistant") => {
+            let Some(blocks) = content.as_array() else {
+                return vec![];
+            };
+            blocks
+                .iter()
+                .filter_map(|b| match b.get("type").and_then(Value::as_str)? {
+                    "thinking" => {
+                        let t = b
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim();
+                        Some(if t.is_empty() {
+                            step(StepKind::ThinkingHidden, String::new())
+                        } else {
+                            step(StepKind::Thinking, t.to_string())
+                        })
+                    }
+                    "redacted_thinking" => Some(step(StepKind::ThinkingHidden, String::new())),
+                    "tool_use" => {
+                        let name = b.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        let input = b.get("input");
+                        let detail = input.and_then(|i| {
+                            [
+                                "description",
+                                "command",
+                                "file_path",
+                                "path",
+                                "pattern",
+                                "url",
+                                "query",
+                                "prompt",
+                            ]
+                            .iter()
+                            .find_map(|k| i.get(*k).and_then(Value::as_str))
+                        });
+                        let text = match detail {
+                            Some(d) => format!("{name}: {}", crate::sanitize::one_line(d, 140)),
+                            None => name.to_string(),
+                        };
+                        Some(step(StepKind::Tool, text))
+                    }
+                    "text" => {
+                        let t = b.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                        (!t.is_empty()).then(|| step(StepKind::Reply, t.to_string()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
 /// Remove blocks the CLI or IDE injects into user messages
 /// (`<ide_selection>…</ide_selection>`, `<command-name>…`, `<system-reminder>…`).
 /// Returns `None` when nothing the human typed is left.
@@ -173,6 +279,8 @@ pub struct TranscriptReader {
     offset: u64,
     partial: String,
     pub stats: TranscriptStats,
+    /// Steps read since the last `take_steps`.
+    steps: Vec<Step>,
 }
 
 impl TranscriptReader {
@@ -182,7 +290,13 @@ impl TranscriptReader {
             offset: 0,
             partial: String::new(),
             stats: TranscriptStats::default(),
+            steps: Vec::new(),
         }
+    }
+
+    /// Steps parsed since the previous call.
+    pub fn take_steps(&mut self) -> Vec<Step> {
+        std::mem::take(&mut self.steps)
     }
 
     pub fn path(&self) -> &Path {
@@ -203,6 +317,7 @@ impl TranscriptReader {
             self.offset = 0;
             self.partial.clear();
             self.stats = TranscriptStats::default();
+            self.steps.clear();
         }
         f.seek(SeekFrom::Start(self.offset))?;
         let mut reader = BufReader::new(f);
@@ -226,6 +341,9 @@ impl TranscriptReader {
                 l.push_str(buf.trim_end());
                 l
             };
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                self.steps.extend(steps_from_line(&v));
+            }
             let a = self.stats.ingest_line(&line);
             if a != TranscriptActivity::Unknown {
                 last = Some(a);
@@ -344,6 +462,53 @@ mod tests {
         s.ingest_line(r#"{"type":"user","message":{"role":"user","content":"<ide_selection>x</ide_selection>"}}"#);
         s.ingest_line(r#"{"type":"user","message":{"role":"user","content":"real question"}}"#);
         assert_eq!(s.first_prompt.as_deref(), Some("real question"));
+    }
+
+    #[test]
+    fn steps_follow_the_process() {
+        let lines = [
+            r#"{"type":"user","message":{"role":"user","content":"<ide_selection>x</ide_selection> add tests"},"timestamp":"2026-10-01T10:00:00Z"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"The parser lacks edge-case tests; start with empty input.","signature":"s"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"","signature":"s"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test -q","description":"Run tests"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"subagent"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Added 3 tests."}]}}"#,
+        ];
+        let steps: Vec<Step> = lines
+            .iter()
+            .flat_map(|l| steps_from_line(&serde_json::from_str(l).unwrap()))
+            .collect();
+        let kinds: Vec<_> = steps.iter().map(|s| s.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                StepKind::Prompt,
+                StepKind::Thinking,
+                StepKind::ThinkingHidden,
+                StepKind::Tool,
+                StepKind::Reply
+            ]
+        );
+        assert_eq!(steps[0].text, "add tests");
+        assert_eq!(steps[0].at.as_deref(), Some("2026-10-01T10:00:00Z"));
+        assert_eq!(steps[3].text, "Bash: Run tests");
+    }
+
+    #[test]
+    fn reader_collects_steps_incrementally() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        std::fs::write(&p, include_str!("../tests/fixtures/transcript.jsonl")).unwrap();
+        let mut r = TranscriptReader::new(p);
+        r.poll().unwrap();
+        let s = r.take_steps();
+        assert!(
+            s.iter()
+                .any(|x| x.kind == StepKind::Prompt && x.text == "add a health endpoint")
+        );
+        assert!(s.iter().any(|x| x.kind == StepKind::Tool));
+        assert!(r.take_steps().is_empty(), "drained");
     }
 
     #[test]

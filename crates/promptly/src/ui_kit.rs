@@ -22,6 +22,7 @@ pub enum Icon {
     Send,
     Refresh,
     Chart,
+    Thought,
 }
 
 /// Paint an icon centered in `rect` with 1.5 px strokes on a 16 px grid.
@@ -130,6 +131,20 @@ pub fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
             line((8.0, 13.0), (8.0, 3.5));
             line((4.0, 7.5), (8.0, 3.5));
             line((12.0, 7.5), (8.0, 3.5));
+        }
+        Icon::Thought => {
+            // Thought bubble: a rounded cloud with two trailing dots.
+            p.rect_stroke(
+                Rect::from_min_max(at(2.0, 2.5), at(14.0, 10.5)),
+                4.0 * s,
+                st,
+                egui::StrokeKind::Middle,
+            );
+            p.circle_filled(at(5.0, 12.6), 1.2 * s, color);
+            p.circle_filled(at(3.2, 14.4), 0.8 * s, color);
+            for x in [5.5, 8.0, 10.5] {
+                p.circle_filled(at(x, 6.5), 0.9 * s, color);
+            }
         }
         Icon::Chart => {
             line((2.5, 13.5), (13.5, 13.5));
