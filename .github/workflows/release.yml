@@ -1,0 +1,71 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Promptly.app (Apple silicon)
+        run: ./scripts/bundle-macos.sh
+      - name: Zip
+        run: |
+          cd target/release
+          ditto -c -k --keepParent Promptly.app "Promptly-${GITHUB_REF_NAME}-macos-arm64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/release/Promptly-*-macos-arm64.zip
+
+  linux:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build deps
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libfontconfig1-dev
+      - name: Build
+        run: cargo build --release --workspace
+      - name: Package tarball and .deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb -p promptly --no-build
+          mkdir -p dist
+          cp target/debian/*.deb dist/
+          tar -C target/release -czf "dist/promptly-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}.tar.gz" promptly promptly-ctl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+
+  publish:
+    needs: [macos, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Promptly ${{ github.ref_name }}
+          files: dist/*
+          generate_release_notes: true

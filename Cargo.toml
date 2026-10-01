@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/promptly-core", "crates/promptly-ctl", "crates/promptly"]
+
+[workspace.package]
+version = "2026.1.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+rust-version = "1.85"
