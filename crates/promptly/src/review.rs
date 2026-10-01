@@ -1,13 +1,18 @@
-//! Review pane: read-only diff of a session's working tree (unified or
-//! split), open-in-$EDITOR, and inline comments sent back as a prompt.
+//! Review pane, modelled on a pull request's "Files changed" tab: a file
+//! tree, every changed file's diff stacked in one virtualised scroll with
+//! sticky file headers, "Viewed" checkboxes, collapsible files, unified or
+//! split view, and line comments sent back to the session as one prompt.
 
-use egui::{Color32, RichText};
+use egui::{Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, pos2, vec2};
 use parking_lot::Mutex;
-use promptly_core::git::{self, DiffLine, FileDiff, LineKind};
+use promptly_core::git::{self, DiffLine, DiffScope, FileDiff, FileStatus, LineKind, ReviewDiff};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use crate::theme;
+use crate::theme::{self, tokens as t};
+use crate::ui_kit::{self as kit, Icon};
 
 #[derive(Clone)]
 pub struct Comment {
@@ -17,53 +22,114 @@ pub struct Comment {
     pub text: String,
 }
 
-type DiffSlot = Arc<Mutex<Option<Result<Vec<FileDiff>, String>>>>;
+type DiffSlot = Arc<Mutex<Option<Result<ReviewDiff, String>>>>;
+
+/// Files longer than this start folded, like GitHub's "Load diff".
+const LARGE_DIFF: usize = 400;
+/// The pane also refreshes on a timer, for edits made outside Claude.
+const AUTO_REFRESH: Duration = Duration::from_secs(8);
+
+const HEADER_H: f32 = 44.0;
+const LINE_H: f32 = 20.0;
+const NOTE_H: f32 = 44.0;
+const COMMENT_H: f32 = 40.0;
+const GAP_H: f32 = 14.0;
+const TREE_W: f32 = 240.0;
 
 #[derive(Default)]
 pub struct ReviewState {
     pub dir: Option<PathBuf>,
-    loaded_seq: Option<u64>,
+    loaded: Option<(u64, DiffScope)>,
+    loaded_at: Option<Instant>,
     result: DiffSlot,
     loading: bool,
-    files: Vec<FileDiff>,
+    diff: Option<ReviewDiff>,
     error: Option<String>,
-    selected: usize,
+    pub scope: DiffScope,
     pub split: bool,
+    viewed: HashSet<String>,
+    collapsed: HashSet<String>,
+    expanded_large: HashSet<String>,
+    scroll_to: Option<usize>,
+    selected: Option<usize>,
     pub comments: Vec<Comment>,
-    draft: Option<(String, Option<u32>, String, String)>,
+    draft: Option<Draft>,
+}
+
+struct Draft {
+    file: String,
+    line: Option<u32>,
+    quote: String,
+    text: String,
 }
 
 pub enum ReviewAction {
     Close,
+    ToggleFull,
     OpenInEditor(PathBuf, Option<u32>),
     SendFeedback(String),
 }
 
+/// One virtualised row of the diff column.
+#[derive(Clone, Copy)]
+enum Row {
+    Header(usize),
+    Line(usize, usize),
+    Split(usize, Option<usize>, Option<usize>),
+    Comment(usize, usize),
+    Note(usize),
+    Gap,
+}
+
+impl Row {
+    fn height(self) -> f32 {
+        match self {
+            Row::Header(_) => HEADER_H,
+            Row::Line(..) | Row::Split(..) => LINE_H,
+            Row::Comment(..) => COMMENT_H,
+            Row::Note(_) => NOTE_H,
+            Row::Gap => GAP_H,
+        }
+    }
+}
+
 impl ReviewState {
-    /// Reload when the session changes or reports new file changes.
+    /// Reload when the session's folder changes, Claude reports file edits,
+    /// the scope changes, or every few seconds.
     pub fn sync(&mut self, dir: &Path, seq: u64, ctx: &egui::Context) {
         if self.dir.as_deref() != Some(dir) {
             self.dir = Some(dir.to_path_buf());
-            self.files.clear();
+            self.diff = None;
+            self.error = None;
             self.comments.clear();
-            self.selected = 0;
-            self.loaded_seq = None;
+            self.viewed.clear();
+            self.collapsed.clear();
+            self.selected = None;
+            self.loaded = None;
         }
-        if self.loaded_seq != Some(seq) && !self.loading {
-            self.loaded_seq = Some(seq);
+        let stale = self.loaded_at.is_none_or(|t| t.elapsed() > AUTO_REFRESH);
+        if (self.loaded != Some((seq, self.scope)) || stale) && !self.loading {
+            self.loaded = Some((seq, self.scope));
             self.reload(ctx);
         }
         if let Some(r) = self.result.lock().take() {
             self.loading = false;
+            self.loaded_at = Some(Instant::now());
             match r {
-                Ok(f) => {
-                    self.files = f;
+                Ok(d) => {
+                    // Keep "viewed" only for files still in the diff.
+                    let paths: HashSet<_> = d.files.iter().map(|f| f.path.clone()).collect();
+                    self.viewed.retain(|p| paths.contains(p));
+                    self.diff = Some(d);
                     self.error = None;
-                    self.selected = self.selected.min(self.files.len().saturating_sub(1));
                 }
-                Err(e) => self.error = Some(e),
+                Err(e) => {
+                    self.diff = None;
+                    self.error = Some(e);
+                }
             }
         }
+        ctx.request_repaint_after(AUTO_REFRESH);
     }
 
     pub fn reload(&mut self, ctx: &egui::Context) {
@@ -71,175 +137,963 @@ impl ReviewState {
         self.loading = true;
         let slot = self.result.clone();
         let ctx = ctx.clone();
+        let scope = self.scope;
         std::thread::spawn(move || {
-            *slot.lock() = Some(git::working_diff(&dir));
+            *slot.lock() = Some(git::review_diff(&dir, scope));
             ctx.request_repaint();
         });
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) -> Option<ReviewAction> {
-        use crate::theme::tokens as t;
-        use crate::ui_kit::{self as kit, Icon};
+    fn is_folded(&self, f: &FileDiff) -> bool {
+        self.collapsed.contains(&f.path) || self.viewed.contains(&f.path)
+    }
+
+    fn rows(&self, d: &ReviewDiff) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for (fi, f) in d.files.iter().enumerate() {
+            rows.push(Row::Header(fi));
+            if self.is_folded(f) {
+                rows.push(Row::Gap);
+                continue;
+            }
+            let folded_large = f.lines.len() > LARGE_DIFF && !self.expanded_large.contains(&f.path);
+            let only_meta = f.lines.iter().all(|l| l.kind == LineKind::Meta);
+            if f.binary || folded_large || only_meta {
+                rows.push(Row::Note(fi));
+            } else if self.split {
+                for (l, r) in split_indices(&f.lines) {
+                    rows.push(Row::Split(fi, l, r));
+                }
+            } else {
+                for li in 0..f.lines.len() {
+                    rows.push(Row::Line(fi, li));
+                    let l = &f.lines[li];
+                    let no = l.new_no.or(l.old_no);
+                    for (ci, c) in self.comments.iter().enumerate() {
+                        if c.file == f.path
+                            && c.line == no
+                            && no.is_some()
+                            && l.kind != LineKind::Hunk
+                        {
+                            rows.push(Row::Comment(fi, ci));
+                        }
+                    }
+                }
+            }
+            rows.push(Row::Gap);
+        }
+        rows
+    }
+
+    pub fn show(&mut self, ui: &mut egui::Ui, full: bool) -> Option<ReviewAction> {
         let mut action = None;
 
-        // Header row, aligned with the pane header (40 px).
-        let (hrect, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::hover());
+        // ------------------------------------------------ header bar
+        let (hrect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
         ui.painter().line_segment(
             [hrect.left_bottom(), hrect.right_bottom()],
-            egui::Stroke::new(1.0, t::BORDER),
+            Stroke::new(1.0, t::BORDER),
         );
         let mut h = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(hrect.shrink2(egui::vec2(12.0, 0.0)))
+                .max_rect(hrect.shrink2(vec2(12.0, 0.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         h.label(RichText::new("Changes").size(14.0).color(t::TEXT));
-        let total: (u32, u32) = self
-            .files
-            .iter()
-            .fold((0, 0), |a, f| (a.0 + f.added, a.1 + f.removed));
-        if !self.files.is_empty() {
-            kit::pill(&mut h, &format!("+{}", total.0), theme::GREEN);
-            kit::pill(&mut h, &format!("−{}", total.1), theme::RED);
+        let mut scope = self.scope;
+        seg2(
+            &mut h,
+            ("seg-scope",),
+            &mut scope,
+            (DiffScope::Branch, "Branch"),
+            (DiffScope::Uncommitted, "Uncommitted"),
+        );
+        if scope != self.scope {
+            self.scope = scope;
+            self.loaded = None;
         }
         h.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if kit::icon_button(ui, Icon::Close, "Close review", false).clicked() {
                 action = Some(ReviewAction::Close);
             }
+            let tip = if full {
+                "Back to the terminal"
+            } else {
+                "Expand review"
+            };
+            if kit::icon_button(ui, Icon::PanelRight, tip, full).clicked() {
+                action = Some(ReviewAction::ToggleFull);
+            }
             if kit::icon_button(ui, Icon::Refresh, "Refresh", self.loading).clicked() {
-                self.loaded_seq = None;
+                self.loaded = None;
             }
             ui.add_space(6.0);
-            segmented(ui, &mut self.split);
+            seg2(
+                ui,
+                ("seg-split",),
+                &mut self.split,
+                (true, "Split"),
+                (false, "Unified"),
+            );
         });
 
-        let body = ui
-            .available_rect_before_wrap()
-            .shrink2(egui::vec2(8.0, 6.0));
-        let mut ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(body)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-        );
-        let ui = &mut ui;
-
+        // ------------------------------------------------ states
         if let Some(e) = &self.error {
-            empty_note(
+            let dir = self.dir.as_ref().map(|d| short(d)).unwrap_or_default();
+            empty_state(
                 ui,
-                if e.contains("not a git") {
-                    "This folder is not a git repository"
+                if e.contains("not inside a git repository") {
+                    "Not a git repository"
                 } else {
-                    e
+                    "Couldn't read changes"
+                },
+                &if e.contains("not inside a git repository") {
+                    format!(
+                        "This session is in {dir}. Open a session inside a repository, or cd into one; the review follows the session's folder."
+                    )
+                } else {
+                    e.clone()
                 },
             );
             return action;
         }
-        if self.files.is_empty() {
-            empty_note(
+        let Some(d) = self.diff.clone() else {
+            empty_state(ui, "Loading changes…", "");
+            return action;
+        };
+
+        // ------------------------------------------------ summary
+        let (add, rem) = d.totals();
+        let viewed_n = d
+            .files
+            .iter()
+            .filter(|f| self.viewed.contains(&f.path))
+            .count();
+        let summary = ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), 46.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add_space(12.0);
+                let n = d.files.len();
+                ui.label(
+                    RichText::new(format!("{n} file{} changed", if n == 1 { "" } else { "s" }))
+                        .size(13.0)
+                        .color(t::TEXT),
+                );
+                ui.label(
+                    RichText::new(format!("+{add}"))
+                        .size(13.0)
+                        .color(theme::GREEN),
+                );
+                ui.label(
+                    RichText::new(format!("−{rem}"))
+                        .size(13.0)
+                        .color(theme::RED),
+                );
+                let ctx_line = match (&d.base, d.scope) {
+                    (Some(b), DiffScope::Branch) => format!(
+                        "{} vs {b}{}",
+                        d.branch.clone().unwrap_or_default(),
+                        if d.ahead > 0 {
+                            format!(
+                                ", {} commit{} ahead",
+                                d.ahead,
+                                if d.ahead == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    _ if self.scope == DiffScope::Branch => format!(
+                        "{}: no base branch, showing uncommitted changes",
+                        d.branch.clone().unwrap_or_default()
+                    ),
+                    _ => "Uncommitted changes".to_string(),
+                };
+                ui.label(RichText::new(ctx_line).size(12.0).color(t::TEXT_3));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(12.0);
+                    if n > 0 {
+                        let frac = viewed_n as f32 / n as f32;
+                        kit::meter(
+                            ui,
+                            frac,
+                            if viewed_n == n {
+                                theme::GREEN
+                            } else {
+                                t::TEXT_2
+                            },
+                            60.0,
+                        );
+                        ui.label(
+                            RichText::new(format!("{viewed_n} / {n} viewed"))
+                                .size(12.0)
+                                .color(t::TEXT_2),
+                        );
+                    }
+                });
+            },
+        );
+        ui.painter().line_segment(
+            [
+                summary.response.rect.left_bottom(),
+                summary.response.rect.right_bottom(),
+            ],
+            Stroke::new(1.0, t::BORDER),
+        );
+
+        if d.files.is_empty() {
+            empty_state(
                 ui,
-                if self.loading {
-                    "Loading changes…"
+                "No changes",
+                if d.scope == DiffScope::Branch {
+                    "This branch matches its base and has nothing uncommitted."
                 } else {
-                    "No changes yet"
+                    "Nothing uncommitted. Switch to Branch to see committed work."
                 },
             );
             return action;
         }
 
-        // File list
-        let list_h = (self.files.len() as f32 * 28.0).min(180.0);
+        // Pending comments and the comment editor sit above the diff.
+        self.comment_bar(ui, &mut action);
+
+        // ------------------------------------------------ tree + diff
+        let body = ui.available_rect_before_wrap();
+        let show_tree = body.width() >= 640.0;
+        let (tree_rect, diff_rect) = if show_tree {
+            let tr = Rect::from_min_size(body.min, vec2(TREE_W, body.height()));
+            let dr = Rect::from_min_max(pos2(body.min.x + TREE_W + 1.0, body.min.y), body.max);
+            (Some(tr), dr)
+        } else {
+            (None, body)
+        };
+        if let Some(tr) = tree_rect {
+            ui.painter().line_segment(
+                [tr.right_top(), tr.right_bottom()],
+                Stroke::new(1.0, t::BORDER),
+            );
+            let mut tu = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(tr.shrink2(vec2(8.0, 8.0)))
+                    .id_salt("review-tree"),
+            );
+            self.tree(&mut tu, &d, &mut action);
+        }
+        let mut du = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(diff_rect)
+                .id_salt("review-diff"),
+        );
+        if !show_tree {
+            self.file_jump(&mut du, &d);
+        }
+        self.diff_column(&mut du, &d, &mut action);
+        ui.advance_cursor_after_rect(body);
+        action
+    }
+
+    // ---------------------------------------------------------------- tree
+
+    fn tree(&mut self, ui: &mut egui::Ui, d: &ReviewDiff, action: &mut Option<ReviewAction>) {
+        let _ = action;
         egui::ScrollArea::vertical()
-            .id_salt("review-files")
-            .max_height(list_h)
+            .id_salt("tree-scroll")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                for (i, f) in self.files.iter().enumerate() {
-                    if file_row(ui, f, i == self.selected).clicked() {
-                        self.selected = i;
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let mut last_dir: Option<String> = None;
+                for (fi, f) in d.files.iter().enumerate() {
+                    let (dir, name) = split_path(&f.path);
+                    if last_dir.as_deref() != Some(dir.as_str()) {
+                        if !dir.is_empty() {
+                            let (r, _) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), 24.0),
+                                Sense::hover(),
+                            );
+                            let g = kit::elide(
+                                ui,
+                                &dir,
+                                FontId::proportional(11.5),
+                                t::TEXT_3,
+                                r.width() - 8.0,
+                            );
+                            ui.painter().galley(
+                                pos2(r.min.x + 4.0, r.center().y - g.size().y / 2.0),
+                                g,
+                                t::TEXT_3,
+                            );
+                        }
+                        last_dir = Some(dir.clone());
+                    }
+                    let indent = if dir.is_empty() { 4.0 } else { 14.0 };
+                    let (r, resp) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+                    let selected = self.selected == Some(fi);
+                    if selected {
+                        ui.painter()
+                            .rect_filled(r, CornerRadius::same(6), t::ACTIVE);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(r, CornerRadius::same(6), t::HOVER);
+                    }
+                    let viewed = self.viewed.contains(&f.path);
+                    let (letter, col) = status_style(f.status);
+                    let p = ui.painter();
+                    p.text(
+                        pos2(r.min.x + indent, r.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        letter,
+                        FontId::monospace(11.0),
+                        col,
+                    );
+                    let name_col = if viewed {
+                        t::TEXT_3
+                    } else if selected {
+                        t::TEXT
+                    } else {
+                        t::TEXT_1
+                    };
+                    let g = kit::elide(
+                        ui,
+                        &name,
+                        FontId::proportional(12.5),
+                        name_col,
+                        r.width() - indent - 70.0,
+                    );
+                    ui.painter().galley(
+                        pos2(r.min.x + indent + 16.0, r.center().y - g.size().y / 2.0),
+                        g,
+                        name_col,
+                    );
+                    let right = if viewed {
+                        "✓".to_string()
+                    } else {
+                        format!("+{} −{}", f.added, f.removed)
+                    };
+                    ui.painter().text(
+                        pos2(r.max.x - 6.0, r.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        right,
+                        FontId::proportional(11.0),
+                        if viewed { theme::GREEN } else { t::TEXT_3 },
+                    );
+                    if resp
+                        .on_hover_text(&f.path)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.selected = Some(fi);
+                        self.scroll_to = Some(fi);
+                        self.collapsed.remove(&f.path);
                     }
                 }
             });
-        ui.add_space(6.0);
-        let file = self.files.get(self.selected).cloned()?;
+    }
 
-        // File toolbar
+    /// Narrow layout: a file picker instead of the tree.
+    fn file_jump(&mut self, ui: &mut egui::Ui, d: &ReviewDiff) {
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let g = kit::elide(
-                ui,
-                &file.path,
-                egui::FontId::monospace(12.0),
-                t::TEXT_1,
-                ui.available_width() - 150.0,
-            );
-            ui.label(g);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Open in editor").clicked()
-                    && let Some(d) = &self.dir
-                {
-                    let root = git::repo_root(d).unwrap_or_else(|| d.clone());
-                    let line = file.lines.iter().find_map(|l| l.new_no);
-                    action = Some(ReviewAction::OpenInEditor(root.join(&file.path), line));
+            ui.add_space(10.0);
+            let label = self
+                .selected
+                .and_then(|i| d.files.get(i))
+                .map(|f| f.path.clone())
+                .unwrap_or_else(|| "Jump to file…".into());
+            egui::ComboBox::from_id_salt("jump")
+                .selected_text(label)
+                .width(ui.available_width() - 20.0)
+                .show_ui(ui, |ui| {
+                    for (fi, f) in d.files.iter().enumerate() {
+                        if ui
+                            .selectable_label(
+                                self.selected == Some(fi),
+                                format!("{}  {}", f.status.letter(), f.path),
+                            )
+                            .clicked()
+                        {
+                            self.selected = Some(fi);
+                            self.scroll_to = Some(fi);
+                        }
+                    }
+                });
+        });
+        ui.add_space(4.0);
+    }
+
+    // ---------------------------------------------------------------- diff
+
+    fn diff_column(
+        &mut self,
+        ui: &mut egui::Ui,
+        d: &ReviewDiff,
+        action: &mut Option<ReviewAction>,
+    ) {
+        let rows = self.rows(d);
+        // Offsets of every row, for virtualisation and jump-to-file.
+        let mut offsets = Vec::with_capacity(rows.len() + 1);
+        let mut y = 8.0;
+        for r in &rows {
+            offsets.push(y);
+            y += r.height();
+        }
+        let total = y + 8.0;
+        let header_y: Vec<(usize, f32, f32)> = {
+            // (file, header top, file bottom)
+            let mut v: Vec<(usize, f32, f32)> = Vec::new();
+            for (i, r) in rows.iter().enumerate() {
+                if let Row::Header(fi) = r {
+                    if let Some(last) = v.last_mut() {
+                        last.2 = offsets[i];
+                    }
+                    v.push((*fi, offsets[i], total));
                 }
-            });
+            }
+            v
+        };
+
+        let mut area = egui::ScrollArea::vertical()
+            .id_salt("diff-scroll")
+            .auto_shrink([false, false]);
+        if let Some(fi) = self.scroll_to.take()
+            && let Some((_, top, _)) = header_y.iter().find(|h| h.0 == fi)
+        {
+            area = area.vertical_scroll_offset((top - 8.0).max(0.0));
+        }
+
+        let mut clicks: Vec<RowClick> = Vec::new();
+        area.show_viewport(ui, |ui, viewport| {
+            ui.set_height(total);
+            let origin = ui.min_rect().min;
+            let width = ui.available_width();
+            let first = offsets
+                .partition_point(|&o| o < viewport.min.y - 60.0)
+                .saturating_sub(1);
+            for (i, row) in rows.iter().enumerate().skip(first) {
+                let top = offsets[i];
+                if top > viewport.max.y {
+                    break;
+                }
+                let rect = Rect::from_min_size(origin + vec2(0.0, top), vec2(width, row.height()));
+                if let Some(c) = self.paint_row(ui, rect, *row, d, i) {
+                    clicks.push(c);
+                }
+            }
+            // Sticky header for the file under the top edge.
+            if let Some(&(fi, top, bottom)) = header_y
+                .iter()
+                .find(|h| h.1 < viewport.min.y && h.2 > viewport.min.y + HEADER_H)
+            {
+                let _ = top;
+                let y = origin.y + viewport.min.y.min(bottom - HEADER_H);
+                let rect = Rect::from_min_size(pos2(origin.x, y), vec2(width, HEADER_H));
+                if let Some(c) = self.paint_header(ui, rect, d, fi, true) {
+                    clicks.push(c);
+                }
+            }
         });
 
-        // Comments + send
-        if !self.comments.is_empty() {
+        for c in clicks {
+            match c {
+                RowClick::ToggleFold(fi) => {
+                    let p = d.files[fi].path.clone();
+                    if self.viewed.contains(&p) {
+                        self.viewed.remove(&p);
+                    } else if !self.collapsed.remove(&p) {
+                        self.collapsed.insert(p);
+                    }
+                    self.selected = Some(fi);
+                }
+                RowClick::ToggleViewed(fi) => {
+                    let p = d.files[fi].path.clone();
+                    if !self.viewed.remove(&p) {
+                        self.viewed.insert(p);
+                        // Like GitHub: marking viewed folds the file and keeps your place.
+                        self.scroll_to = Some(fi);
+                    }
+                }
+                RowClick::Open(fi, line) => {
+                    *action = Some(ReviewAction::OpenInEditor(
+                        d.root.join(&d.files[fi].path),
+                        line,
+                    ));
+                }
+                RowClick::ShowLarge(fi) => {
+                    self.expanded_large.insert(d.files[fi].path.clone());
+                }
+                RowClick::Comment(fi, li) => {
+                    let f = &d.files[fi];
+                    let l = &f.lines[li];
+                    self.draft = Some(Draft {
+                        file: f.path.clone(),
+                        line: l.new_no.or(l.old_no),
+                        quote: l.text.clone(),
+                        text: String::new(),
+                    });
+                }
+                RowClick::DeleteComment(ci) => {
+                    if ci < self.comments.len() {
+                        self.comments.remove(ci);
+                    }
+                }
+            }
+        }
+    }
+
+    fn paint_row(
+        &self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        row: Row,
+        d: &ReviewDiff,
+        idx: usize,
+    ) -> Option<RowClick> {
+        match row {
+            Row::Header(fi) => self.paint_header(ui, rect, d, fi, false),
+            Row::Gap => None,
+            Row::Note(fi) => {
+                let f = &d.files[fi];
+                let r = rect.shrink2(vec2(12.0, 0.0));
+                ui.painter().rect_filled(
+                    r,
+                    CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: 8,
+                        se: 8,
+                    },
+                    t::BG_MAIN,
+                );
+                let (text, link) = if f.binary {
+                    ("Binary file not shown.".to_string(), None)
+                } else if f.lines.len() > LARGE_DIFF {
+                    (
+                        format!("Large diff, {} lines.", f.lines.len()),
+                        Some("Load diff"),
+                    )
+                } else {
+                    (
+                        f.lines
+                            .iter()
+                            .map(|l| l.text.clone())
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                        None,
+                    )
+                };
+                ui.painter().text(
+                    pos2(r.min.x + 16.0, r.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &text,
+                    FontId::proportional(12.5),
+                    t::TEXT_2,
+                );
+                if let Some(l) = link {
+                    let lr = Rect::from_min_size(
+                        pos2(r.min.x + 30.0 + text.len() as f32 * 6.6, r.min.y + 10.0),
+                        vec2(80.0, 24.0),
+                    );
+                    let resp = ui.interact(lr, ui.id().with(("load", fi)), Sense::click());
+                    ui.painter().text(
+                        lr.left_center(),
+                        egui::Align2::LEFT_CENTER,
+                        l,
+                        FontId::proportional(12.5),
+                        theme::BLUE,
+                    );
+                    if resp
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        return Some(RowClick::ShowLarge(fi));
+                    }
+                }
+                None
+            }
+            Row::Line(fi, li) => {
+                let f = &d.files[fi];
+                let l = &f.lines[li];
+                let r = rect.shrink2(vec2(12.0, 0.0));
+                let commented = self.comments.iter().any(|c| {
+                    c.file == f.path && c.line == l.new_no.or(l.old_no) && c.line.is_some()
+                });
+                let resp = ui.interact(r, ui.id().with(("ln", idx)), Sense::click());
+                paint_line(ui, r, Some(l), true, commented, resp.hovered());
+                if l.kind != LineKind::Hunk && l.kind != LineKind::Meta {
+                    let resp = resp
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Click to comment on this line");
+                    if resp.clicked() {
+                        return Some(RowClick::Comment(fi, li));
+                    }
+                }
+                None
+            }
+            Row::Split(fi, l, r) => {
+                let f = &d.files[fi];
+                let inner = rect.shrink2(vec2(12.0, 0.0));
+                let half = inner.width() / 2.0;
+                let lr = Rect::from_min_size(inner.min, vec2(half, inner.height()));
+                let rr =
+                    Rect::from_min_size(inner.min + vec2(half, 0.0), vec2(half, inner.height()));
+                let left = l.map(|i| &f.lines[i]).filter(|x| x.kind != LineKind::Added);
+                let right = r
+                    .map(|i| &f.lines[i])
+                    .filter(|x| x.kind != LineKind::Removed);
+                paint_line(ui, lr, left, l.is_some(), false, false);
+                paint_line(ui, rr, right, r.is_some(), false, false);
+                ui.painter().line_segment(
+                    [rr.left_top(), rr.left_bottom()],
+                    Stroke::new(1.0, t::BORDER),
+                );
+                None
+            }
+            Row::Comment(_fi, ci) => {
+                let c = &self.comments[ci];
+                let r = rect.shrink2(vec2(12.0, 0.0)).shrink2(vec2(40.0, 4.0));
+                ui.painter().rect(
+                    r,
+                    CornerRadius::same(8),
+                    t::BG_ELEVATED,
+                    Stroke::new(1.0, t::ACCENT.gamma_multiply(0.6)),
+                    egui::StrokeKind::Inside,
+                );
+                let g = kit::elide(
+                    ui,
+                    &c.text,
+                    FontId::proportional(12.5),
+                    t::TEXT,
+                    r.width() - 90.0,
+                );
+                ui.painter().galley(
+                    pos2(r.min.x + 12.0, r.center().y - g.size().y / 2.0),
+                    g,
+                    t::TEXT,
+                );
+                let del = Rect::from_min_size(
+                    pos2(r.max.x - 64.0, r.min.y + 6.0),
+                    vec2(56.0, r.height() - 12.0),
+                );
+                let resp = ui.interact(del, ui.id().with(("del", ci)), Sense::click());
+                ui.painter().text(
+                    del.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Delete",
+                    FontId::proportional(11.5),
+                    if resp.hovered() {
+                        theme::RED
+                    } else {
+                        t::TEXT_3
+                    },
+                );
+                if resp
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    return Some(RowClick::DeleteComment(ci));
+                }
+                None
+            }
+        }
+    }
+
+    /// File header: fold chevron, status, path, +/− bar, Viewed, Open.
+    fn paint_header(
+        &self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        d: &ReviewDiff,
+        fi: usize,
+        sticky: bool,
+    ) -> Option<RowClick> {
+        let f = &d.files[fi];
+        let r = rect.shrink2(vec2(12.0, 0.0)).with_max_y(rect.max.y - 4.0);
+        let folded = self.is_folded(f);
+        let viewed = self.viewed.contains(&f.path);
+        let radius = if folded {
+            CornerRadius::same(8)
+        } else {
+            CornerRadius {
+                nw: 8,
+                ne: 8,
+                sw: 0,
+                se: 0,
+            }
+        };
+        let p = ui.painter();
+        if sticky {
+            p.rect_filled(rect.with_max_y(r.max.y), 0.0, t::BG_SIDEBAR);
+        }
+        p.rect(
+            r,
+            radius,
+            t::BG_ELEVATED,
+            Stroke::new(1.0, t::BORDER),
+            egui::StrokeKind::Inside,
+        );
+        let id = ui.id().with(("hdr", fi, sticky));
+        let mut click = None;
+
+        // Chevron + path area toggles folding.
+        let fold_r = Rect::from_min_max(r.min, pos2(r.max.x - 190.0, r.max.y));
+        let fold = ui.interact(fold_r, id.with("fold"), Sense::click());
+        let cx = r.min.x + 16.0;
+        let cy = r.center().y;
+        let chev = if folded {
+            vec![
+                pos2(cx - 3.0, cy - 5.0),
+                pos2(cx + 3.0, cy),
+                pos2(cx - 3.0, cy + 5.0),
+            ]
+        } else {
+            vec![
+                pos2(cx - 5.0, cy - 3.0),
+                pos2(cx, cy + 3.0),
+                pos2(cx + 5.0, cy - 3.0),
+            ]
+        };
+        ui.painter()
+            .add(egui::Shape::line(chev, Stroke::new(1.6, t::TEXT_2)));
+        let (letter, col) = status_style(f.status);
+        let badge = Rect::from_center_size(pos2(r.min.x + 40.0, cy), vec2(18.0, 18.0));
+        ui.painter()
+            .rect_filled(badge, CornerRadius::same(4), col.gamma_multiply(0.18));
+        ui.painter().text(
+            badge.center(),
+            egui::Align2::CENTER_CENTER,
+            letter,
+            FontId::monospace(11.0),
+            col,
+        );
+
+        // Path: directory muted, file name bright; renames show old → new.
+        let (dir, name) = split_path(&f.path);
+        let mut job = egui::text::LayoutJob::default();
+        if let Some(old) = &f.old_path {
+            job.append(
+                &format!("{old} → "),
+                0.0,
+                egui::TextFormat::simple(FontId::monospace(12.0), t::TEXT_3),
+            );
+        }
+        job.append(
+            &dir,
+            0.0,
+            egui::TextFormat::simple(FontId::monospace(12.0), t::TEXT_3),
+        );
+        job.append(
+            &name,
+            0.0,
+            egui::TextFormat::simple(
+                FontId::monospace(12.0),
+                if viewed { t::TEXT_2 } else { t::TEXT },
+            ),
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: fold_r.width() - 150.0,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let g = ui.fonts_mut(|fo| fo.layout_job(job));
+        let gw = g.size().x;
+        ui.painter()
+            .galley(pos2(r.min.x + 58.0, cy - g.size().y / 2.0), g, t::TEXT);
+
+        // +N −M and the five-block bar, like GitHub.
+        let stat_x = r.min.x + 66.0 + gw;
+        let stat = format!("+{} −{}", f.added, f.removed);
+        ui.painter().text(
+            pos2(stat_x, cy),
+            egui::Align2::LEFT_CENTER,
+            &stat,
+            FontId::proportional(11.5),
+            t::TEXT_2,
+        );
+        let blocks_x = stat_x + stat.len() as f32 * 6.4 + 8.0;
+        let total = (f.added + f.removed).max(1) as f32;
+        let green = ((f.added as f32 / total) * 5.0).round() as usize;
+        let red = if f.removed > 0 { (5 - green).max(1) } else { 0 };
+        for b in 0..5 {
+            let c = if b < green {
+                theme::GREEN
+            } else if b < green + red {
+                theme::RED
+            } else {
+                t::BORDER_STRONG
+            };
+            ui.painter().rect_filled(
+                Rect::from_min_size(pos2(blocks_x + b as f32 * 9.0, cy - 4.0), vec2(8.0, 8.0)),
+                CornerRadius::same(2),
+                c,
+            );
+        }
+        if fold
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            click = Some(RowClick::ToggleFold(fi));
+        }
+
+        // Viewed checkbox.
+        let vr = Rect::from_min_size(pos2(r.max.x - 182.0, cy - 13.0), vec2(84.0, 26.0));
+        let vresp = ui.interact(vr, id.with("viewed"), Sense::click());
+        let fill = if viewed {
+            theme::BLUE.gamma_multiply(0.22)
+        } else if vresp.hovered() {
+            t::HOVER
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect(
+            vr,
+            CornerRadius::same(6),
+            fill,
+            Stroke::new(
+                1.0,
+                if viewed {
+                    theme::BLUE.gamma_multiply(0.6)
+                } else {
+                    t::BORDER_STRONG
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+        let box_r = Rect::from_center_size(pos2(vr.min.x + 15.0, cy), vec2(12.0, 12.0));
+        ui.painter().rect(
+            box_r,
+            CornerRadius::same(3),
+            if viewed {
+                theme::BLUE
+            } else {
+                Color32::TRANSPARENT
+            },
+            Stroke::new(1.2, if viewed { theme::BLUE } else { t::TEXT_2 }),
+            egui::StrokeKind::Inside,
+        );
+        if viewed {
+            ui.painter().add(egui::Shape::line(
+                vec![
+                    pos2(box_r.min.x + 2.5, cy),
+                    pos2(box_r.min.x + 5.0, cy + 2.8),
+                    pos2(box_r.max.x - 2.0, cy - 3.0),
+                ],
+                Stroke::new(1.6, Color32::WHITE),
+            ));
+        }
+        ui.painter().text(
+            pos2(vr.min.x + 28.0, cy),
+            egui::Align2::LEFT_CENTER,
+            "Viewed",
+            FontId::proportional(12.0),
+            if viewed { t::TEXT } else { t::TEXT_2 },
+        );
+        if vresp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            click = Some(RowClick::ToggleViewed(fi));
+        }
+
+        // Open in editor.
+        let or = Rect::from_min_size(pos2(r.max.x - 92.0, cy - 13.0), vec2(80.0, 26.0));
+        let oresp = ui.interact(or, id.with("open"), Sense::click());
+        if oresp.hovered() {
+            ui.painter()
+                .rect_filled(or, CornerRadius::same(6), t::HOVER);
+        }
+        ui.painter().text(
+            or.center(),
+            egui::Align2::CENTER_CENTER,
+            "Open file",
+            FontId::proportional(12.0),
+            t::TEXT_2,
+        );
+        if f.status != FileStatus::Deleted
+            && oresp
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+        {
+            let line = f.lines.iter().find_map(|l| {
+                if l.kind == LineKind::Added {
+                    l.new_no
+                } else {
+                    None
+                }
+            });
+            click = Some(RowClick::Open(fi, line));
+        }
+        click
+    }
+
+    // ---------------------------------------------------------------- comments
+
+    fn comment_bar(&mut self, ui: &mut egui::Ui, action: &mut Option<ReviewAction>) {
+        if !self.comments.is_empty() && self.draft.is_none() {
             egui::Frame::new()
                 .fill(t::ACCENT.gamma_multiply(0.10))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(10, 6))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .outer_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let n = self.comments.len();
                         ui.label(
-                            RichText::new(format!("{n} comment{}", if n == 1 { "" } else { "s" }))
-                                .color(t::TEXT_1),
+                            RichText::new(format!(
+                                "{n} pending comment{}",
+                                if n == 1 { "" } else { "s" }
+                            ))
+                            .color(t::TEXT_1),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if kit::primary_button(
                                 ui,
                                 Some(Icon::Send),
-                                "Send to session",
+                                "Send review to session",
                                 None,
                                 false,
                             )
                             .clicked()
                             {
-                                action = Some(ReviewAction::SendFeedback(feedback_prompt(
+                                *action = Some(ReviewAction::SendFeedback(feedback_prompt(
                                     &self.comments,
                                 )));
                                 self.comments.clear();
                             }
-                            if ui.small_button("Clear").clicked() {
+                            if ui.small_button("Discard").clicked() {
                                 self.comments.clear();
                             }
                         });
                     });
                 });
-            ui.add_space(4.0);
         }
-        if let Some((path, line, _quote, text)) = self.draft.as_mut() {
-            let mut done = None;
+        let mut done = None;
+        if let Some(dr) = self.draft.as_mut() {
             egui::Frame::new()
                 .fill(t::BG_ELEVATED)
-                .stroke(egui::Stroke::new(1.0, t::BORDER))
-                .corner_radius(egui::CornerRadius::same(8))
+                .stroke(Stroke::new(1.0, t::BORDER_STRONG))
+                .corner_radius(CornerRadius::same(8))
                 .inner_margin(egui::Margin::same(10))
+                .outer_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new(format!(
-                            "Comment on {path}{}",
-                            line.map(|l| format!(":{l}")).unwrap_or_default()
+                            "Comment on {}{}",
+                            dr.file,
+                            dr.line.map(|l| format!(":{l}")).unwrap_or_default()
                         ))
                         .size(12.0)
                         .color(t::TEXT_2),
                     );
+                    ui.label(
+                        RichText::new(dr.quote.trim())
+                            .monospace()
+                            .size(11.5)
+                            .color(t::TEXT_3),
+                    );
                     let r = ui.add(
-                        egui::TextEdit::multiline(text)
-                            .frame(egui::Frame::NONE)
+                        egui::TextEdit::multiline(&mut dr.text)
                             .desired_rows(2)
                             .desired_width(f32::INFINITY)
                             .hint_text("What should change here?"),
@@ -256,7 +1110,8 @@ impl ReviewState {
                                 && ui.input(|i| {
                                     i.key_pressed(egui::Key::Enter) && i.modifiers.command
                                 });
-                            if kit::primary_button(ui, None, "Add comment", None, false).clicked()
+                            if kit::primary_button(ui, None, "Add comment", Some("⌘↵"), false)
+                                .clicked()
                                 || enter
                             {
                                 done = Some(true);
@@ -264,109 +1119,210 @@ impl ReviewState {
                         });
                     });
                 });
-            ui.add_space(4.0);
-            match done {
-                Some(true) if !text.trim().is_empty() => {
-                    let (path, line, quote, text) = self.draft.take().unwrap();
+        }
+        match done {
+            Some(true) => {
+                if let Some(dr) = self.draft.take()
+                    && !dr.text.trim().is_empty()
+                {
                     self.comments.push(Comment {
-                        file: path,
-                        line,
-                        quote,
-                        text: text.trim().to_string(),
+                        file: dr.file,
+                        line: dr.line,
+                        quote: dr.quote,
+                        text: dr.text.trim().to_string(),
                     });
                 }
-                Some(_) => self.draft = None,
-                None => {}
             }
+            Some(false) => self.draft = None,
+            None => {}
         }
-
-        // Diff body
-        let row_h = 18.0;
-        let commented: Vec<Option<u32>> = self
-            .comments
-            .iter()
-            .filter(|c| c.file == file.path)
-            .map(|c| c.line)
-            .collect();
-        let mut new_draft = None;
-        egui::Frame::new()
-            .fill(t::BG_MAIN)
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(0, 4))
-            .show(ui, |ui| {
-                let rows: Vec<(Option<&DiffLine>, Option<&DiffLine>)> = if self.split {
-                    git::split_rows(&file.lines)
-                } else {
-                    file.lines.iter().map(|l| (Some(l), None)).collect()
-                };
-                egui::ScrollArea::both()
-                    .id_salt(("review-diff", &file.path))
-                    .auto_shrink([false, false])
-                    .show_rows(ui, row_h, rows.len(), |ui, range| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        for (l, r) in &rows[range] {
-                            if self.split {
-                                let w = ui.available_width() / 2.0;
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 0.0;
-                                    diff_row(ui, side_of(*l, LineKind::Removed), w, false);
-                                    diff_row(ui, side_of(*r, LineKind::Added), w, false);
-                                });
-                            } else if let Some(l) = l {
-                                let marked = commented.contains(&l.new_no.or(l.old_no));
-                                let resp = diff_row(ui, Some(l), ui.available_width(), marked);
-                                if l.kind != LineKind::Hunk
-                                    && l.kind != LineKind::Meta
-                                    && resp
-                                        .on_hover_text("Click to comment on this line")
-                                        .clicked()
-                                {
-                                    new_draft = Some((
-                                        file.path.clone(),
-                                        l.new_no.or(l.old_no),
-                                        l.text.clone(),
-                                        String::new(),
-                                    ));
-                                }
-                            }
-                        }
-                    });
-            });
-        if new_draft.is_some() {
-            self.draft = new_draft;
-        }
-        action
     }
 }
 
-fn side_of(l: Option<&DiffLine>, side: LineKind) -> Option<&DiffLine> {
-    l.filter(|l| {
-        l.kind == side || matches!(l.kind, LineKind::Context | LineKind::Hunk | LineKind::Meta)
-    })
+enum RowClick {
+    ToggleFold(usize),
+    ToggleViewed(usize),
+    Open(usize, Option<u32>),
+    ShowLarge(usize),
+    Comment(usize, usize),
+    DeleteComment(usize),
 }
 
-/// Two-option segmented control: Unified | Split.
-fn segmented(ui: &mut egui::Ui, split: &mut bool) {
-    use crate::theme::tokens as t;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(124.0, 26.0), egui::Sense::hover());
+/// Index pairs for split view: removed/added runs side by side.
+fn split_indices(lines: &[DiffLine]) -> Vec<(Option<usize>, Option<usize>)> {
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        match lines[i].kind {
+            LineKind::Removed | LineKind::Added => {
+                let s = i;
+                while i < lines.len() && lines[i].kind == LineKind::Removed {
+                    i += 1;
+                }
+                let rem: Vec<usize> = (s..i).collect();
+                let a = i;
+                while i < lines.len() && lines[i].kind == LineKind::Added {
+                    i += 1;
+                }
+                let add: Vec<usize> = (a..i).collect();
+                for k in 0..rem.len().max(add.len()) {
+                    rows.push((rem.get(k).copied(), add.get(k).copied()));
+                }
+            }
+            _ => {
+                rows.push((Some(i), Some(i)));
+                i += 1;
+            }
+        }
+    }
+    rows
+}
+
+/// One diff line with gutter, sign and colouring. `None` paints an empty cell.
+fn paint_line(
+    ui: &egui::Ui,
+    rect: Rect,
+    l: Option<&DiffLine>,
+    present: bool,
+    commented: bool,
+    hovered: bool,
+) {
+    let p = ui.painter_at(rect);
+    let Some(l) = l else {
+        let fill = if present { t::BG_MAIN } else { t::BG_SIDEBAR };
+        p.rect_filled(rect, 0.0, fill);
+        return;
+    };
+    let (bg, fg, sign) = match l.kind {
+        LineKind::Added => (
+            Color32::from_rgba_unmultiplied(0x3f, 0xb9, 0x50, 30),
+            Color32::from_rgb(0xc3, 0xe8, 0xca),
+            "+",
+        ),
+        LineKind::Removed => (
+            Color32::from_rgba_unmultiplied(0xe5, 0x53, 0x4b, 30),
+            Color32::from_rgb(0xf3, 0xc0, 0xbc),
+            "−",
+        ),
+        LineKind::Hunk => (
+            Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xf6, 22),
+            Color32::from_rgb(0x8f, 0xb8, 0xfb),
+            "",
+        ),
+        LineKind::Meta => (t::BG_MAIN, t::TEXT_3, ""),
+        LineKind::Context => (t::BG_MAIN, t::TEXT_2, " "),
+    };
+    p.rect_filled(
+        rect,
+        0.0,
+        if hovered && l.kind != LineKind::Hunk {
+            t::HOVER
+        } else {
+            bg
+        },
+    );
+    let mono = FontId::monospace(11.5);
+    let gutter = 92.0;
+    if l.kind != LineKind::Hunk {
+        p.rect_filled(
+            Rect::from_min_size(rect.min, vec2(gutter - 8.0, rect.height())),
+            0.0,
+            Color32::from_black_alpha(40),
+        );
+        if let Some(n) = l.old_no {
+            p.text(
+                pos2(rect.min.x + 38.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                n.to_string(),
+                mono.clone(),
+                t::TEXT_3,
+            );
+        }
+        if let Some(n) = l.new_no {
+            p.text(
+                pos2(rect.min.x + 76.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                n.to_string(),
+                mono.clone(),
+                t::TEXT_3,
+            );
+        }
+    }
+    if commented {
+        p.circle_filled(
+            pos2(rect.min.x + 6.0, rect.center().y),
+            3.0,
+            t::ACCENT_HOVER,
+        );
+    }
+    let text = if l.kind == LineKind::Hunk {
+        l.text.clone()
+    } else {
+        format!("{sign} {}", l.text.replace('\t', "    "))
+    };
+    let x = if l.kind == LineKind::Hunk {
+        rect.min.x + 12.0
+    } else {
+        rect.min.x + gutter
+    };
+    p.text(
+        pos2(x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        mono,
+        fg,
+    );
+}
+
+fn status_style(s: FileStatus) -> (&'static str, Color32) {
+    match s {
+        FileStatus::Added => ("A", theme::GREEN),
+        FileStatus::Modified => ("M", theme::AMBER),
+        FileStatus::Deleted => ("D", theme::RED),
+        FileStatus::Renamed => ("R", theme::BLUE),
+    }
+}
+
+/// ("src/server/", "main.rs")
+fn split_path(p: &str) -> (String, String) {
+    match p.rsplit_once('/') {
+        Some((d, n)) => (format!("{d}/"), n.to_string()),
+        None => (String::new(), p.to_string()),
+    }
+}
+
+fn short(p: &Path) -> String {
+    let home = promptly_core::paths::home();
+    match p.strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => p.display().to_string(),
+    }
+}
+
+/// Two-option segmented control.
+fn seg2<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    value: &mut T,
+    a: (T, &str),
+    b: (T, &str),
+) {
+    let font = FontId::proportional(12.0);
+    let wa = ui.fonts_mut(|f| f.layout_no_wrap(a.1.into(), font.clone(), t::TEXT).size().x) + 24.0;
+    let wb = ui.fonts_mut(|f| f.layout_no_wrap(b.1.into(), font.clone(), t::TEXT).size().x) + 24.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(wa + wb + 4.0, 26.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, egui::CornerRadius::same(7), t::BG_MAIN);
-    let half = rect.width() / 2.0;
-    // Laid out right-to-left: Split is the right half.
-    for (i, (label, value)) in [("Unified", false), ("Split", true)]
-        .into_iter()
-        .enumerate()
-    {
-        let r = egui::Rect::from_min_size(
-            rect.min + egui::vec2(half * i as f32, 0.0),
-            egui::vec2(half, rect.height()),
-        )
-        .shrink(2.0);
-        let resp = ui.interact(r, ui.id().with(("seg", label)), egui::Sense::click());
-        let on = *split == value;
+        .rect_filled(rect, CornerRadius::same(7), t::BG_MAIN);
+    let base = ui.id().with(id);
+    let mut x = rect.min.x + 2.0;
+    for (opt, label, w) in [(a.0, a.1, wa), (b.0, b.1, wb)] {
+        let r = Rect::from_min_size(pos2(x, rect.min.y + 2.0), vec2(w, rect.height() - 4.0));
+        let resp = ui.interact(r, base.with(label), Sense::click());
+        let on = *value == opt;
         if on {
             ui.painter()
-                .rect_filled(r, egui::CornerRadius::same(5), t::ACTIVE);
+                .rect_filled(r, CornerRadius::same(5), t::ACTIVE);
         }
         let col = if on || resp.hovered() {
             t::TEXT
@@ -377,167 +1333,29 @@ fn segmented(ui: &mut egui::Ui, split: &mut bool) {
             r.center(),
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::proportional(12.0),
+            font.clone(),
             col,
         );
         if resp
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
         {
-            *split = value;
+            *value = opt;
         }
+        x += w;
     }
 }
 
-fn empty_note(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(40.0);
+fn empty_state(ui: &mut egui::Ui, title: &str, body: &str) {
+    ui.add_space(48.0);
     ui.vertical_centered(|ui| {
-        ui.label(RichText::new(text).color(crate::theme::tokens::TEXT_3));
+        ui.set_max_width(360.0);
+        ui.label(RichText::new(title).size(15.0).color(t::TEXT_1));
+        if !body.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new(body).size(12.5).color(t::TEXT_3));
+        }
     });
-}
-
-fn file_row(ui: &mut egui::Ui, f: &FileDiff, selected: bool) -> egui::Response {
-    use crate::theme::tokens as t;
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 27.0), egui::Sense::click());
-    if selected {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(6), t::ACTIVE);
-    } else if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(6), t::HOVER);
-    }
-    let (letter, col) = if f.untracked {
-        ("A", theme::GREEN)
-    } else if f.removed > 0
-        && f.added == 0
-        && f.lines.iter().any(|l| l.text.starts_with("deleted file"))
-    {
-        ("D", theme::RED)
-    } else {
-        ("M", theme::AMBER)
-    };
-    let p = ui.painter();
-    p.text(
-        egui::pos2(rect.min.x + 10.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        letter,
-        egui::FontId::monospace(11.5),
-        col,
-    );
-    let (dir, name) = match f.path.rsplit_once('/') {
-        Some((d, n)) => (format!("{d}/"), n.to_string()),
-        None => (String::new(), f.path.clone()),
-    };
-    let counts = format!("+{} −{}", f.added, f.removed);
-    let counts_w = 70.0;
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
-        &name,
-        0.0,
-        egui::TextFormat::simple(
-            egui::FontId::proportional(13.0),
-            if selected { t::TEXT } else { t::TEXT_1 },
-        ),
-    );
-    job.append(
-        &format!("  {dir}"),
-        0.0,
-        egui::TextFormat::simple(egui::FontId::proportional(11.5), t::TEXT_3),
-    );
-    job.wrap = egui::text::TextWrapping {
-        max_width: rect.width() - 30.0 - counts_w,
-        max_rows: 1,
-        break_anywhere: true,
-        overflow_character: Some('…'),
-    };
-    let g = ui.fonts_mut(|fo| fo.layout_job(job));
-    p.galley(
-        egui::pos2(rect.min.x + 28.0, rect.center().y - g.size().y / 2.0),
-        g,
-        t::TEXT_1,
-    );
-    p.text(
-        egui::pos2(rect.max.x - 10.0, rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        counts,
-        egui::FontId::monospace(11.0),
-        t::TEXT_3,
-    );
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// One diff line, painted full width with a line-number gutter.
-fn diff_row(
-    ui: &mut egui::Ui,
-    l: Option<&DiffLine>,
-    width: f32,
-    commented: bool,
-) -> egui::Response {
-    use crate::theme::tokens as t;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 18.0), egui::Sense::click());
-    let Some(l) = l else {
-        ui.painter()
-            .rect_filled(rect, 0.0, t::BG_SIDEBAR.gamma_multiply(0.6));
-        return resp;
-    };
-    let (bg, fg, sign) = match l.kind {
-        LineKind::Added => (
-            Color32::from_rgba_unmultiplied(0x3f, 0xb9, 0x50, 28),
-            Color32::from_rgb(0xb7, 0xe4, 0xbf),
-            "+",
-        ),
-        LineKind::Removed => (
-            Color32::from_rgba_unmultiplied(0xe5, 0x53, 0x4b, 28),
-            Color32::from_rgb(0xf0, 0xb4, 0xb0),
-            "−",
-        ),
-        LineKind::Hunk => (
-            Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xf6, 18),
-            theme::BLUE,
-            "",
-        ),
-        LineKind::Meta => (Color32::TRANSPARENT, t::TEXT_3, ""),
-        LineKind::Context => (Color32::TRANSPARENT, t::TEXT_2, " "),
-    };
-    let p = ui.painter();
-    let hover = resp.hovered()
-        && matches!(
-            l.kind,
-            LineKind::Added | LineKind::Removed | LineKind::Context
-        );
-    p.rect_filled(rect, 0.0, if hover { t::HOVER } else { bg });
-    let mono = egui::FontId::monospace(11.5);
-    let gutter = 44.0;
-    if let Some(n) = l.new_no.or(l.old_no) {
-        p.text(
-            egui::pos2(rect.min.x + gutter - 8.0, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            n.to_string(),
-            mono.clone(),
-            t::TEXT_3,
-        );
-    }
-    if commented {
-        p.circle_filled(
-            egui::pos2(rect.min.x + 6.0, rect.center().y),
-            3.0,
-            t::ACCENT_HOVER,
-        );
-    }
-    let text = if l.kind == LineKind::Hunk || l.kind == LineKind::Meta {
-        l.text.clone()
-    } else {
-        format!("{sign} {}", l.text)
-    };
-    p.text(
-        egui::pos2(rect.min.x + gutter, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        text,
-        mono,
-        fg,
-    );
-    resp
 }
 
 /// Turn review comments into a structured prompt for the session.
@@ -571,5 +1389,47 @@ mod tests {
             text: "use a const".into(),
         }]);
         assert!(p.contains("1. src/a.rs:12\n   > let x = 1;\n   use a const"));
+    }
+
+    #[test]
+    fn split_pairs_runs() {
+        let l = |k| DiffLine {
+            kind: k,
+            text: String::new(),
+            old_no: None,
+            new_no: None,
+        };
+        let lines = vec![
+            l(LineKind::Context),
+            l(LineKind::Removed),
+            l(LineKind::Added),
+            l(LineKind::Added),
+        ];
+        assert_eq!(
+            split_indices(&lines),
+            vec![(Some(0), Some(0)), (Some(1), Some(2)), (None, Some(3))]
+        );
+    }
+
+    #[test]
+    fn rows_fold_viewed_files() {
+        let mut st = ReviewState::default();
+        let f = FileDiff {
+            path: "a.rs".into(),
+            lines: vec![DiffLine {
+                kind: LineKind::Added,
+                text: "x".into(),
+                old_no: None,
+                new_no: Some(1),
+            }],
+            ..Default::default()
+        };
+        let d = ReviewDiff {
+            files: vec![f],
+            ..Default::default()
+        };
+        assert_eq!(st.rows(&d).len(), 3, "header, line, gap");
+        st.viewed.insert("a.rs".into());
+        assert_eq!(st.rows(&d).len(), 2, "viewed folds to header + gap");
     }
 }

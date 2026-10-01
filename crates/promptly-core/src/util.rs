@@ -27,6 +27,48 @@ pub fn run_stdout(cmd: &mut Command) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
+/// Current working directory of a process (the session's live folder).
+pub fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+        // SAFETY: `info` is a properly sized, writable buffer for this flavor.
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        if n != size {
+            return None;
+        }
+        // vip_path is a MAXPATHLEN byte buffer, split into chunks by libc.
+        let raw: Vec<u8> = info
+            .pvi_cdir
+            .vip_path
+            .iter()
+            .flatten()
+            .map(|c| *c as u8)
+            .collect();
+        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+        let s = String::from_utf8_lossy(&raw[..end]).to_string();
+        (!s.is_empty()).then(|| std::path::PathBuf::from(s))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 pub fn new_uuid() -> String {
     let b: [u8; 16] = rand::random();
     let mut b = b;
@@ -56,6 +98,16 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_process_cwd_matches() {
+        let want = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let got = process_cwd(std::process::id())
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        assert_eq!(got, want);
+    }
 
     #[test]
     fn uuid_is_v4_shaped() {

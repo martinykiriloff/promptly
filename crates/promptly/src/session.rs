@@ -284,6 +284,13 @@ impl ClaudeLink {
                         let Some(meta) = c.sessions.get_mut(&pane) else {
                             return;
                         };
+                        // Claude reports its working directory with every hook.
+                        if let Some(cwd) = ev.cwd.as_ref().filter(|c| c.is_dir())
+                            && meta.cwd != *cwd
+                        {
+                            meta.cwd = cwd.clone();
+                            meta.change_seq += 1;
+                        }
                         if let Some(p) = &ev.transcript_path
                             && meta.transcript_path.as_ref() != Some(p)
                         {

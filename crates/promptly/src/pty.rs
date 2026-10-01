@@ -259,6 +259,8 @@ pub struct Pane {
     pub term: Arc<FairMutex<Term<Listener>>>,
     sender: EventLoopSender,
     size: Arc<Mutex<WindowSize>>,
+    /// The shell, or `claude` itself (it is exec'd), running in this pane.
+    pub child_pid: u32,
 }
 
 impl Pane {
@@ -290,6 +292,7 @@ impl Pane {
             env,
         };
         let inner = tty::new(&opts, size, id)?;
+        let child_pid = inner.child().id();
         let file = inner.file().try_clone()?;
         let reader = TeeReader {
             file,
@@ -332,6 +335,7 @@ impl Pane {
             term,
             sender,
             size: size_cell,
+            child_pid,
         })
     }
 

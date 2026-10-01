@@ -182,9 +182,32 @@ pub struct DiffLine {
     pub new_no: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileStatus {
+    Added,
+    #[default]
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+impl FileStatus {
+    pub fn letter(self) -> &'static str {
+        match self {
+            Self::Added => "A",
+            Self::Modified => "M",
+            Self::Deleted => "D",
+            Self::Renamed => "R",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct FileDiff {
     pub path: String,
+    /// Previous path for renames.
+    pub old_path: Option<String>,
+    pub status: FileStatus,
     pub added: u32,
     pub removed: u32,
     pub untracked: bool,
@@ -192,16 +215,94 @@ pub struct FileDiff {
     pub lines: Vec<DiffLine>,
 }
 
-/// Max bytes of an untracked file rendered in the review pane.
-const MAX_UNTRACKED: u64 = 256 * 1024;
+/// What the review compares against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffScope {
+    /// Like a pull request: everything since the branch left its base,
+    /// committed or not.
+    #[default]
+    Branch,
+    /// Only changes not yet committed.
+    Uncommitted,
+}
 
-/// All changes in the working tree relative to HEAD, including untracked
-/// files (rendered as additions without touching the index).
-pub fn working_diff(dir: &Path) -> Result<Vec<FileDiff>, String> {
-    let root = repo_root(dir).ok_or("not a git repository")?;
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ReviewDiff {
+    pub root: PathBuf,
+    pub files: Vec<FileDiff>,
+    /// The scope actually used (Branch falls back to Uncommitted on the base branch).
+    pub scope: DiffScope,
+    pub branch: Option<String>,
+    pub base: Option<String>,
+    /// Commits on this branch that the base doesn't have.
+    pub ahead: u32,
+}
+
+impl ReviewDiff {
+    pub fn totals(&self) -> (u32, u32) {
+        self.files
+            .iter()
+            .fold((0, 0), |a, f| (a.0 + f.added, a.1 + f.removed))
+    }
+}
+
+/// The branch a pull request would target: origin's default branch, else a
+/// local or remote `main`/`master`.
+pub fn default_base(dir: &Path) -> Option<String> {
+    if let Some(b) = run_stdout(git(dir).args([
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "refs/remotes/origin/HEAD",
+    ])) {
+        return Some(b);
+    }
+    ["main", "master", "origin/main", "origin/master"]
+        .into_iter()
+        .find(|r| run_stdout(git(dir).args(["rev-parse", "--verify", "--quiet", r])).is_some())
+        .map(str::to_owned)
+}
+
+/// The review diff for `dir`. `Branch` compares the working tree with the
+/// merge-base of HEAD and the base branch, so it shows every change a pull
+/// request would, plus anything not committed yet.
+pub fn review_diff(dir: &Path, scope: DiffScope) -> Result<ReviewDiff, String> {
+    let root = repo_root(dir)
+        .ok_or_else(|| format!("{} is not inside a git repository", dir.display()))?;
+    let branch = current_branch(&root);
+    let mut out = ReviewDiff {
+        root: root.clone(),
+        branch: branch.clone(),
+        ..Default::default()
+    };
+    if scope == DiffScope::Branch
+        && let Some(base) = default_base(&root)
+    {
+        let base_short = base.trim_start_matches("origin/");
+        let on_base = branch
+            .as_deref()
+            .is_some_and(|b| b == base || b == base_short);
+        if !on_base && let Some(mb) = run_stdout(git(&root).args(["merge-base", "HEAD", &base])) {
+            out.files = diff_against(&root, Some(&mb))?;
+            out.ahead =
+                run_stdout(git(&root).args(["rev-list", "--count", &format!("{mb}..HEAD")]))
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
+            out.base = Some(base);
+            out.scope = DiffScope::Branch;
+            return Ok(out);
+        }
+    }
+    out.files = diff_against(&root, None)?;
+    out.scope = DiffScope::Uncommitted;
+    Ok(out)
+}
+
+/// Working tree vs `rev` (or HEAD), plus untracked files.
+fn diff_against(root: &Path, rev: Option<&str>) -> Result<Vec<FileDiff>, String> {
     let has_head =
-        run_stdout(git(&root).args(["rev-parse", "--verify", "--quiet", "HEAD"])).is_some();
-    let mut cmd = git(&root);
+        run_stdout(git(root).args(["rev-parse", "--verify", "--quiet", "HEAD"])).is_some();
+    let mut cmd = git(root);
     cmd.args([
         "-c",
         "core.quotepath=off",
@@ -210,10 +311,16 @@ pub fn working_diff(dir: &Path) -> Result<Vec<FileDiff>, String> {
         "--no-ext-diff",
         "-M",
     ]);
-    if has_head {
-        cmd.arg("HEAD");
-    } else {
-        cmd.arg("--cached");
+    match (rev, has_head) {
+        (Some(r), _) => {
+            cmd.arg(r);
+        }
+        (None, true) => {
+            cmd.arg("HEAD");
+        }
+        (None, false) => {
+            cmd.arg("--cached");
+        }
     }
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -221,24 +328,32 @@ pub fn working_diff(dir: &Path) -> Result<Vec<FileDiff>, String> {
     }
     let mut files = parse_unified(&String::from_utf8_lossy(&out.stdout));
     if let Some(list) =
-        run_stdout(git(&root).args(["ls-files", "--others", "--exclude-standard", "-z"]))
+        run_stdout(git(root).args(["ls-files", "--others", "--exclude-standard", "-z"]))
     {
         for rel in list.split('\0').filter(|s| !s.is_empty()) {
-            files.push(untracked_diff(&root, rel));
+            files.push(untracked_diff(root, rel));
         }
     }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
+}
+
+/// Max bytes of an untracked file rendered in the review pane.
+const MAX_UNTRACKED: u64 = 256 * 1024;
+
+/// All changes in the working tree relative to HEAD, including untracked
+/// files (rendered as additions without touching the index).
+pub fn working_diff(dir: &Path) -> Result<Vec<FileDiff>, String> {
+    review_diff(dir, DiffScope::Uncommitted).map(|d| d.files)
 }
 
 fn untracked_diff(root: &Path, rel: &str) -> FileDiff {
     let p = root.join(rel);
     let mut fd = FileDiff {
         path: rel.to_string(),
-        added: 0,
-        removed: 0,
+        status: FileStatus::Added,
         untracked: true,
-        binary: false,
-        lines: vec![],
+        ..Default::default()
     };
     let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
     if size > MAX_UNTRACKED {
@@ -292,11 +407,7 @@ pub fn parse_unified(diff: &str) -> Vec<FileDiff> {
                 .unwrap_or_else(|| rest.to_string());
             files.push(FileDiff {
                 path,
-                added: 0,
-                removed: 0,
-                untracked: false,
-                binary: false,
-                lines: vec![],
+                ..Default::default()
             });
             continue;
         }
@@ -357,6 +468,14 @@ pub fn parse_unified(diff: &str) -> Vec<FileDiff> {
             || line.starts_with("new file")
             || line.starts_with("deleted file")
         {
+            if line.starts_with("new file") {
+                f.status = FileStatus::Added;
+            } else if line.starts_with("deleted file") {
+                f.status = FileStatus::Deleted;
+            } else if let Some(from) = line.strip_prefix("rename from ") {
+                f.status = FileStatus::Renamed;
+                f.old_path = Some(from.to_string());
+            }
             f.lines.push(DiffLine {
                 kind: LineKind::Meta,
                 text: line.to_string(),
@@ -482,5 +601,65 @@ index 1..2 100644
         remove_worktree(&wt).unwrap();
         assert!(!wt.path.exists());
         assert_eq!(list_worktrees(&repo).len(), 2);
+    }
+
+    #[test]
+    fn branch_review_matches_a_pull_request() {
+        let t = tempfile::tempdir().unwrap();
+        let repo = t.path().join("r");
+        std::fs::create_dir(&repo).unwrap();
+        let g = |args: &[&str]| {
+            let o = git(&repo)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        g(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("keep.txt"), "a\nb\n").unwrap();
+        std::fs::write(repo.join("old.txt"), "same content here\n").unwrap();
+        std::fs::write(repo.join("gone.txt"), "bye\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "base"]);
+        g(&["checkout", "-qb", "feature"]);
+        std::fs::write(repo.join("keep.txt"), "a\nB\n").unwrap();
+        g(&["mv", "old.txt", "new.txt"]);
+        g(&["rm", "-q", "gone.txt"]);
+        g(&["commit", "-qam", "feature work"]);
+        std::fs::write(repo.join("fresh.txt"), "not committed\n").unwrap();
+
+        let d = review_diff(&repo, DiffScope::Branch).unwrap();
+        assert_eq!(d.scope, DiffScope::Branch);
+        assert_eq!(d.base.as_deref(), Some("main"));
+        assert_eq!(d.ahead, 1);
+        let st = |p: &str| d.files.iter().find(|f| f.path == p).map(|f| f.status);
+        assert_eq!(st("keep.txt"), Some(FileStatus::Modified));
+        assert_eq!(st("new.txt"), Some(FileStatus::Renamed));
+        assert_eq!(st("gone.txt"), Some(FileStatus::Deleted));
+        assert_eq!(
+            st("fresh.txt"),
+            Some(FileStatus::Added),
+            "uncommitted files are included"
+        );
+        assert_eq!(d.totals(), (2, 2));
+
+        // Uncommitted-only scope sees just the new file.
+        let u = review_diff(&repo, DiffScope::Uncommitted).unwrap();
+        assert_eq!(u.files.len(), 1);
+
+        // On the base branch itself, Branch falls back to uncommitted changes.
+        g(&["stash", "-qu"]);
+        g(&["checkout", "-q", "main"]);
+        let m = review_diff(&repo, DiffScope::Branch).unwrap();
+        assert_eq!(m.scope, DiffScope::Uncommitted);
+        assert!(m.files.is_empty());
+
+        let e = review_diff(t.path(), DiffScope::Branch).unwrap_err();
+        assert!(e.contains("is not inside a git repository"), "{e}");
     }
 }

@@ -78,6 +78,7 @@ enum Action {
     Usage,
     CheckUpdates,
     InstallUpdate,
+    ReviewFull,
 }
 
 const ACTIONS: &[(Action, &str, &str, &str)] = &[
@@ -202,6 +203,12 @@ const ACTIONS: &[(Action, &str, &str, &str)] = &[
     ),
     (Action::Usage, "usage", "Usage dashboard", "primary+u"),
     (
+        Action::ReviewFull,
+        "review_full",
+        "Review all changes (full width)",
+        "primary+shift+r",
+    ),
+    (
         Action::CheckUpdates,
         "check_updates",
         "Check for updates",
@@ -250,6 +257,8 @@ pub struct App {
     composer_open: bool,
     review: ReviewState,
     review_open: bool,
+    /// Review takes the whole main area, like a pull request page.
+    review_full: bool,
     palette: Option<Palette>,
     history: Option<HistoryPicker>,
     fanout: Option<FanOut>,
@@ -375,6 +384,7 @@ impl App {
             composer_open: true,
             review: ReviewState::default(),
             review_open: false,
+            review_full: false,
             palette: None,
             history: None,
             fanout: None,
@@ -761,10 +771,17 @@ impl App {
             match ev {
                 AppEvent::Term(id, ev) => self.on_term_event(id, ev),
                 AppEvent::Shell(id, mark) => {
+                    let mut moved = false;
                     let mut c = self.core.lock();
                     if let Some(m) = c.sessions.get_mut(&id) {
                         match mark {
-                            ShellMark::Cwd(p) => m.cwd = p,
+                            ShellMark::Cwd(p) => {
+                                moved = m.cwd != p;
+                                if moved {
+                                    m.cwd = p;
+                                    m.change_seq += 1;
+                                }
+                            }
                             ShellMark::CommandExecuted => m.command_running = true,
                             ShellMark::CommandFinished(code) => {
                                 m.command_running = false;
@@ -773,6 +790,10 @@ impl App {
                             }
                             ShellMark::PromptStart | ShellMark::CommandStart => {}
                         }
+                    }
+                    drop(c);
+                    if moved {
+                        self.refresh_branch(id);
                     }
                 }
                 AppEvent::Control(req, resp) => self.on_control(req, resp),
@@ -1012,7 +1033,16 @@ impl App {
                     None => self.toast("No session needs you"),
                 }
             }
-            Action::ToggleReview => self.review_open = !self.review_open,
+            Action::ToggleReview => {
+                self.review_open = !self.review_open;
+                self.review_full = false;
+            }
+            Action::ReviewFull => {
+                self.review_open = true;
+                self.review_full = !self.review_full;
+                self.grid_mode = false;
+                self.usage_mode = false;
+            }
             Action::ToggleComposer => {
                 self.composer_open = !self.composer_open;
                 self.composer.focus_requested = self.composer_open;
@@ -1480,6 +1510,40 @@ impl App {
         }
         for a in actions {
             self.run(a);
+        }
+    }
+
+    /// The review pane, docked on the right or full width like a PR page.
+    fn review_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, full: bool) {
+        let target = self.active.and_then(|id| {
+            self.core
+                .lock()
+                .sessions
+                .get(&id)
+                .map(|m| (m.cwd.clone(), m.change_seq))
+        });
+        let Some((cwd, seq)) = target else {
+            ui.add_space(48.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("No session selected").color(theme::tokens::TEXT_3));
+            });
+            return;
+        };
+        self.review.sync(&cwd, seq, ctx);
+        match self.review.show(ui, full) {
+            Some(ReviewAction::OpenInEditor(path, line)) => self.open_in_editor(&path, line),
+            Some(ReviewAction::SendFeedback(text)) => {
+                if let Some(id) = self.active {
+                    self.send_prompt(id, &text);
+                    self.review_full = false;
+                }
+            }
+            Some(ReviewAction::Close) => {
+                self.review_open = false;
+                self.review_full = false;
+            }
+            Some(ReviewAction::ToggleFull) => self.review_full = !self.review_full,
+            None => {}
         }
     }
 
@@ -3007,7 +3071,21 @@ impl eframe::App for App {
         self.core.lock().focused = if window_focused { self.active } else { None };
         if self.last_poll.elapsed() > Duration::from_secs(5) {
             self.last_poll = Instant::now();
-            for id in self.panes.keys().copied().collect::<Vec<_>>() {
+            // Follow each session's live folder (cd in a shell, Claude moving
+            // into a repo), then refresh its branch.
+            let pids: Vec<(PaneId, u32)> = self
+                .panes
+                .iter()
+                .map(|(id, e)| (*id, e.pane.child_pid))
+                .collect();
+            for (id, pid) in pids {
+                if let Some(cwd) = promptly_core::util::process_cwd(pid)
+                    && let Some(m) = self.core.lock().sessions.get_mut(&id)
+                    && m.cwd != cwd
+                {
+                    m.cwd = cwd;
+                    m.change_seq += 1;
+                }
                 self.refresh_branch(id);
             }
         }
@@ -3060,47 +3138,21 @@ impl eframe::App for App {
             )
             .show(ui, |ui| self.sidebar(ui));
 
-        if self.review_open && !self.grid_mode && !self.usage_mode {
+        if self.review_open && !self.review_full && !self.grid_mode && !self.usage_mode {
             egui::Panel::right("review")
                 .resizable(true)
-                .default_size(480.0)
-                .size_range(300.0..=900.0)
+                .default_size(720.0)
+                .size_range(360.0..=1600.0)
                 .frame(egui::Frame::new().fill(t::BG_SIDEBAR))
-                .show(ui, |ui| {
-                    let target = self.active.and_then(|id| {
-                        self.core
-                            .lock()
-                            .sessions
-                            .get(&id)
-                            .map(|m| (m.cwd.clone(), m.change_seq))
-                    });
-                    match target {
-                        Some((cwd, seq)) => {
-                            self.review.sync(&cwd, seq, &ctx);
-                            match self.review.show(ui) {
-                                Some(ReviewAction::OpenInEditor(path, line)) => {
-                                    self.open_in_editor(&path, line)
-                                }
-                                Some(ReviewAction::SendFeedback(text)) => {
-                                    if let Some(id) = self.active {
-                                        self.send_prompt(id, &text);
-                                    }
-                                }
-                                Some(ReviewAction::Close) => self.review_open = false,
-                                None => {}
-                            }
-                        }
-                        None => {
-                            ui.add_space(48.0);
-                            ui.vertical_centered(|ui| {
-                                ui.label(RichText::new("No session selected").color(t::TEXT_3));
-                            });
-                        }
-                    }
-                });
+                .show(ui, |ui| self.review_ui(ui, &ctx, false));
         }
 
-        if self.composer_open && !self.grid_mode && !self.usage_mode && self.active.is_some() {
+        if self.composer_open
+            && !self.grid_mode
+            && !self.usage_mode
+            && !(self.review_open && self.review_full)
+            && self.active.is_some()
+        {
             egui::Panel::bottom("composer")
                 .resizable(false)
                 .show_separator_line(false)
@@ -3149,6 +3201,9 @@ impl eframe::App for App {
                 self.usage_view(ui);
             } else if self.grid_mode {
                 self.grid(ui);
+            } else if self.review_open && self.review_full {
+                ui.painter().rect_filled(ui.max_rect(), 0.0, t::BG_SIDEBAR);
+                self.review_ui(ui, &ctx, true);
             } else {
                 self.panes_area(ui, overlay_open);
             }
