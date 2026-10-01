@@ -1346,18 +1346,10 @@ impl App {
         window_drag_zone(ui, strip, "sidebar-drag");
 
         let new_sc = self.sc(Action::NewClaude);
-        if kit::primary_button(
-            ui,
-            Some(Icon::Sparkle),
-            "New Claude session",
-            new_sc.as_deref(),
-            true,
-        )
-        .clicked()
-        {
+        if kit::new_row(ui, "New Claude session", new_sc.as_deref()).clicked() {
             actions.push(Action::NewClaude);
         }
-        ui.add_space(4.0);
+        ui.add_space(2.0);
         for (icon, label, action) in [
             (Icon::Terminal, "New shell", Action::NewShell),
             (Icon::Fork, "Fan out tasks", Action::FanOut),
@@ -1543,11 +1535,6 @@ impl App {
                 {
                     actions.push(Action::Palette);
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(sc) = self.sc(Action::Palette) {
-                        kit::kbd(ui, &sc);
-                    }
-                });
             });
             ui.add_space(6.0);
             // A bottom-up layout would stretch the card; give it a box of its
@@ -1942,9 +1929,17 @@ impl App {
                         }
                     });
                     ui.add_space(4.0);
-                    charts::limit_row(ui, "5-hour", five, now, reduce);
-                    ui.add_space(6.0);
-                    charts::limit_row(ui, "Weekly", week, now, reduce);
+                    if five.is_none() && week.is_none() {
+                        ui.label(
+                            RichText::new("Plan limits appear after Claude's first reply.")
+                                .size(11.5)
+                                .color(t::TEXT_3),
+                        );
+                    } else {
+                        charts::limit_row(ui, "5-hour", five, now, reduce);
+                        ui.add_space(6.0);
+                        charts::limit_row(ui, "Weekly", week, now, reduce);
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let s = charts::tween(ui, "spend-total", spend as f32, reduce);
@@ -3142,96 +3137,113 @@ impl App {
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.settings_open;
+        use theme::tokens as t;
+        if !self.settings_open {
+            return;
+        }
+        const SECTIONS: [(Icon, &str); 5] = [
+            (Icon::Sparkle, "Claude"),
+            (Icon::Eye, "Appearance"),
+            (Icon::Clock, "Notifications"),
+            (Icon::Refresh, "Updates"),
+            (Icon::Sliders, "Advanced"),
+        ];
+        let tab_id = egui::Id::new("settings-tab");
+        let mut tab: usize = ctx.data(|d| d.get_temp(tab_id)).unwrap_or(0);
         let mut actions = vec![];
+        let mut close = false;
         let before = (
             self.show_thinking,
+            self.show_claude_input,
             self.reduce_motion,
             self.option_as_meta,
             self.high_contrast,
         );
-        egui::Window::new("Settings").open(&mut open).default_width(560.0).show(ctx, |ui| {
-            ui.heading("Claude");
-            if self.hooks_locked {
-                ui.colored_label(theme::AMBER, "Hooks are locked down by organization-managed settings. Promptly uses transcript tailing instead.");
-            }
-            ui.checkbox(&mut self.cfg.claude.inject_hooks, "Inject session-scoped hooks (applies to new sessions)");
-            ui.checkbox(&mut self.cfg.claude.wrap_statusline, "Wrap the status line to read cost and context % (chains to your own)");
-            ui.checkbox(&mut self.show_claude_input, "Show Claude Code's own input box")
-                .on_hover_text("Off: Promptly's composer is the only input; Claude's input box is hidden and typing in the terminal goes to the composer. Claude's menus and permission prompts always stay visible.");
-            if ui
-                .checkbox(&mut self.show_thinking, "Show Claude's thinking")
-                .on_hover_text("Adds a Thinking panel with Claude's reasoning, tool calls and replies, and shows the latest thought in the sidebar while a session works.")
-                .changed()
-            {
-                self.thinking_open = self.show_thinking;
-            }
-            ui.collapsing("Injected hooks", |ui| {
-                ui.label("Passed with --settings for each session. Your ~/.claude/settings.json is never modified; your own hooks keep running.");
-                let json = match &self.ctl_path {
-                    Some(ctl) => serde_json::to_string_pretty(&InjectedSettings::build(ctl, self.cfg.claude.wrap_statusline).json).unwrap_or_default(),
-                    None => "promptly-ctl not found: nothing is injected.".into(),
-                };
-                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    ui.label(RichText::new(json).monospace().small());
+        let modal = egui::Modal::new(egui::Id::new("settings"))
+            .frame(
+                kit::floating_frame()
+                    .fill(t::BG_MAIN)
+                    .inner_margin(egui::Margin::ZERO),
+            )
+            .show(ctx, |ui| {
+                let size = egui::vec2(780.0, 540.0)
+                    .min(ctx.content_rect().size() - egui::vec2(48.0, 48.0));
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+
+                // Category sidebar.
+                let nav = egui::Rect::from_min_size(rect.min, egui::vec2(200.0, rect.height()));
+                ui.painter().rect_filled(
+                    nav,
+                    egui::CornerRadius {
+                        nw: 14,
+                        sw: 14,
+                        ne: 0,
+                        se: 0,
+                    },
+                    t::BG_SIDEBAR,
+                );
+                ui.painter()
+                    .vline(nav.max.x, nav.y_range(), egui::Stroke::new(1.0, t::BORDER));
+                let mut nui = ui.new_child(
+                    egui::UiBuilder::new().max_rect(nav.shrink2(egui::vec2(10.0, 16.0))),
+                );
+                nui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Settings").size(15.0).strong().color(t::TEXT));
                 });
-            });
-            ui.separator();
-            ui.heading("Notifications");
-            let mut c = self.core.lock();
-            ui.checkbox(&mut c.notifications_enabled, "Native notifications");
-            ui.checkbox(&mut c.policy.notify_on_finish, "Notify when a turn finishes");
-            drop(c);
-            ui.separator();
-            ui.heading("Terminal");
-            ui.add(egui::Slider::new(&mut self.font_size, 8.0..=32.0).text("Font size"));
-            ui.checkbox(&mut self.option_as_meta, "Use Option as Meta");
-            ui.checkbox(&mut self.reduce_motion, "Reduce motion (no animated numbers)");
-            if ui.checkbox(&mut self.high_contrast, "High contrast").changed() {
-                theme::apply_chrome(ctx, self.high_contrast);
-            }
-            ui.separator();
-            ui.heading("Updates");
-            ui.horizontal(|ui| {
-                ui.label(format!("Promptly {}", current_version()));
-                let status = match &*self.update.lock() {
-                    UpdateState::Checking => "checking…".to_string(),
-                    UpdateState::UpToDate => "up to date".to_string(),
-                    UpdateState::Available(r) => format!("v{} available", r.version()),
-                    UpdateState::Working(m) => m.clone(),
-                    UpdateState::Ready { version, .. } => format!("v{version} ready, restart to finish"),
-                    UpdateState::Failed(e) => e.clone(),
-                    UpdateState::Idle => String::new(),
-                };
-                ui.label(RichText::new(status).color(theme::tokens::TEXT_3));
-                if ui.button("Check now").clicked() {
-                    actions.push(Action::CheckUpdates);
+                nui.add_space(12.0);
+                nui.spacing_mut().item_spacing.y = 2.0;
+                for (i, (icon, label)) in SECTIONS.iter().enumerate() {
+                    if kit::nav_item(&mut nui, *icon, label, tab == i).clicked() {
+                        tab = i;
+                    }
                 }
+                nui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(format!("Promptly {}", current_version()))
+                                .size(11.5)
+                                .color(t::TEXT_3),
+                        );
+                    });
+                });
+
+                // Content.
+                let content = egui::Rect::from_min_max(egui::pos2(nav.max.x, rect.min.y), rect.max);
+                let mut cui = ui.new_child(
+                    egui::UiBuilder::new().max_rect(content.shrink2(egui::vec2(28.0, 18.0))),
+                );
+                cui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(SECTIONS[tab].1)
+                            .size(19.0)
+                            .strong()
+                            .color(t::TEXT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if kit::icon_button(ui, Icon::Close, "Close (Esc)", false).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                cui.add_space(14.0);
+                egui::ScrollArea::vertical()
+                    .id_salt(("settings-scroll", tab))
+                    .auto_shrink([false, false])
+                    .show(&mut cui, |ui| {
+                        ui.set_width(ui.available_width() - 4.0);
+                        self.settings_section(ui, tab, &mut actions);
+                    });
             });
-            ui.checkbox(&mut self.cfg.updates.check, "Check for updates automatically");
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(Config::path().to_string_lossy()).monospace().small());
-                if ui.button("Reload").clicked() {
-                    actions.push(Action::ReloadConfig);
-                }
-            });
-            if let Some(e) = &self.cfg_error {
-                ui.colored_label(theme::RED, e);
-            }
-            ui.horizontal(|ui| {
-                if ui.button("Hook event log").clicked() {
-                    actions.push(Action::EventLog);
-                }
-                if ui.button("Copy diagnostics").clicked() {
-                    actions.push(Action::CopyDiagnostics);
-                }
-            });
-        });
-        self.settings_open = open;
+        ctx.data_mut(|d| d.insert_temp(tab_id, tab));
+        if close || modal.should_close() {
+            self.settings_open = false;
+        }
         if before
             != (
                 self.show_thinking,
+                self.show_claude_input,
                 self.reduce_motion,
                 self.option_as_meta,
                 self.high_contrast,
@@ -3241,6 +3253,236 @@ impl App {
         }
         for a in actions {
             self.run(a);
+        }
+    }
+
+    fn settings_section(&mut self, ui: &mut egui::Ui, tab: usize, actions: &mut Vec<Action>) {
+        use theme::tokens as t;
+        match tab {
+            0 => {
+                if self.hooks_locked {
+                    egui::Frame::new()
+                        .fill(theme::AMBER.gamma_multiply(0.10))
+                        .stroke(egui::Stroke::new(1.0, theme::AMBER.gamma_multiply(0.35)))
+                        .corner_radius(egui::CornerRadius::same(10))
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                RichText::new("Hooks are locked down by organization-managed settings. Promptly reads transcripts instead.")
+                                    .size(12.5)
+                                    .color(theme::AMBER),
+                            );
+                        });
+                    ui.add_space(14.0);
+                }
+                kit::settings_group(ui, Some("Input"), |ui| {
+                    kit::setting_row(
+                        ui,
+                        true,
+                        "Show Claude Code's own input box",
+                        "Off: Promptly's composer is the only input. Menus and permission prompts stay visible.",
+                        switch(&mut self.show_claude_input),
+                    );
+                    let changed = kit::setting_row(
+                        ui,
+                        false,
+                        "Show Claude's thinking",
+                        "Reasoning, tool calls and replies in a side panel; latest thought in the sidebar.",
+                        switch(&mut self.show_thinking),
+                    );
+                    if changed {
+                        self.thinking_open = self.show_thinking;
+                    }
+                });
+                kit::settings_group(ui, Some("Integration"), |ui| {
+                    kit::setting_row(
+                        ui,
+                        true,
+                        "Inject session-scoped hooks",
+                        "Applies to new sessions. ~/.claude/settings.json is never modified.",
+                        switch(&mut self.cfg.claude.inject_hooks),
+                    );
+                    kit::setting_row(
+                        ui,
+                        false,
+                        "Wrap the status line",
+                        "Reads cost and context %, then chains to your own status line.",
+                        switch(&mut self.cfg.claude.wrap_statusline),
+                    );
+                });
+                let json = match &self.ctl_path {
+                    Some(ctl) => serde_json::to_string_pretty(
+                        &InjectedSettings::build(ctl, self.cfg.claude.wrap_statusline).json,
+                    )
+                    .unwrap_or_default(),
+                    None => "promptly-ctl not found: nothing is injected.".into(),
+                };
+                let open_id = ui.id().with("hooks-json");
+                let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+                kit::settings_group(ui, Some("Injected settings"), |ui| {
+                    kit::setting_row(
+                        ui,
+                        true,
+                        "Passed with --settings for each session",
+                        "Your own hooks keep running alongside.",
+                        |ui| {
+                            if kit::secondary_button(
+                                ui,
+                                Some(if open {
+                                    Icon::ChevronDown
+                                } else {
+                                    Icon::ChevronRight
+                                }),
+                                if open { "Hide" } else { "Show" },
+                            )
+                            .clicked()
+                            {
+                                open = !open;
+                            }
+                        },
+                    );
+                    if open {
+                        egui::ScrollArea::vertical()
+                            .id_salt("hooks-json")
+                            .max_height(220.0)
+                            .show(ui, |ui| {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(json).monospace().size(11.5).color(t::TEXT_2),
+                                );
+                                ui.add_space(10.0);
+                            });
+                    }
+                });
+                ui.data_mut(|d| d.insert_temp(open_id, open));
+            }
+            1 => {
+                kit::settings_group(ui, Some("Terminal"), |ui| {
+                    kit::setting_row(ui, true, "Font size", "", |ui| {
+                        kit::stepper(ui, &mut self.font_size, 8.0..=32.0, " pt")
+                    });
+                    kit::setting_row(
+                        ui,
+                        false,
+                        "Use Option as Meta",
+                        "Sends Esc-prefixed keys for Option combinations.",
+                        switch(&mut self.option_as_meta),
+                    );
+                });
+                let mut hc = false;
+                kit::settings_group(ui, Some("Accessibility"), |ui| {
+                    kit::setting_row(
+                        ui,
+                        true,
+                        "Reduce motion",
+                        "No animated numbers or transitions.",
+                        switch(&mut self.reduce_motion),
+                    );
+                    hc = kit::setting_row(
+                        ui,
+                        false,
+                        "High contrast",
+                        "",
+                        switch(&mut self.high_contrast),
+                    );
+                });
+                if hc {
+                    theme::apply_chrome(ui.ctx(), self.high_contrast);
+                }
+            }
+            2 => {
+                let mut c = self.core.lock();
+                kit::settings_group(ui, None, |ui| {
+                    kit::setting_row(
+                        ui,
+                        true,
+                        "Native notifications",
+                        "When a session needs approval or is waiting for you.",
+                        switch(&mut c.notifications_enabled),
+                    );
+                    kit::setting_row(
+                        ui,
+                        false,
+                        "Notify when a turn finishes",
+                        "",
+                        switch(&mut c.policy.notify_on_finish),
+                    );
+                });
+            }
+            3 => {
+                let status = match &*self.update.lock() {
+                    UpdateState::Checking => "Checking…".to_string(),
+                    UpdateState::UpToDate => "Promptly is up to date.".to_string(),
+                    UpdateState::Available(r) => format!("Version {} is available.", r.version()),
+                    UpdateState::Working(m) => m.clone(),
+                    UpdateState::Ready { version, .. } => {
+                        format!("Version {version} is ready. Restart to finish.")
+                    }
+                    UpdateState::Failed(e) => e.clone(),
+                    UpdateState::Idle => String::new(),
+                };
+                kit::settings_group(ui, None, |ui| {
+                    kit::setting_row(
+                        ui,
+                        true,
+                        &format!("Promptly {}", current_version()),
+                        &status,
+                        |ui| {
+                            if kit::secondary_button(ui, Some(Icon::Refresh), "Check now").clicked()
+                            {
+                                actions.push(Action::CheckUpdates);
+                            }
+                        },
+                    );
+                    kit::setting_row(
+                        ui,
+                        false,
+                        "Check for updates automatically",
+                        "",
+                        switch(&mut self.cfg.updates.check),
+                    );
+                });
+            }
+            _ => {
+                let path = Config::path().to_string_lossy().to_string();
+                kit::settings_group(ui, Some("Configuration"), |ui| {
+                    kit::setting_row(ui, true, "Config file", &short_path(&path), |ui| {
+                        if kit::secondary_button(ui, None, "Reload").clicked() {
+                            actions.push(Action::ReloadConfig);
+                        }
+                    });
+                    if let Some(e) = &self.cfg_error {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(e).size(12.0).color(theme::RED));
+                        ui.add_space(8.0);
+                    }
+                });
+                kit::settings_group(ui, Some("Diagnostics"), |ui| {
+                    kit::setting_row(
+                        ui,
+                        true,
+                        "Hook event log",
+                        "Every hook event Promptly received.",
+                        |ui| {
+                            if kit::secondary_button(ui, None, "Open").clicked() {
+                                actions.push(Action::EventLog);
+                            }
+                        },
+                    );
+                    kit::setting_row(
+                        ui,
+                        false,
+                        "Diagnostics",
+                        "Versions, paths and session states for bug reports.",
+                        |ui| {
+                            if kit::secondary_button(ui, None, "Copy").clicked() {
+                                actions.push(Action::CopyDiagnostics);
+                            }
+                        },
+                    );
+                });
+            }
         }
     }
 
@@ -3698,6 +3940,44 @@ fn install_update(
     }
 }
 
+/// Scenes rendered by the offscreen screenshot test (`shots.rs`).
+#[cfg(test)]
+pub type Scene = (&'static str, fn(&mut App));
+
+#[cfg(test)]
+pub fn shot_scenes() -> Vec<Scene> {
+    vec![
+        ("02-repo-review", |a| {
+            a.spawn(NewSession {
+                cwd: Some("/tmp/prdemo2".into()),
+                ..Default::default()
+            });
+            a.review_open = true;
+        }),
+        ("03-review-full", |a| a.run(Action::ReviewFull)),
+        ("04-composer-slash", |a| {
+            a.run(Action::ReviewFull);
+            a.review_open = false;
+            a.composer.text = "/re".into();
+            a.composer.focus_requested = true;
+        }),
+        ("05-thinking", |a| {
+            a.composer.text.clear();
+            a.show_thinking = true;
+            a.thinking_open = true;
+        }),
+        ("06-usage", |a| a.run(Action::Usage)),
+        ("07-palette", |a| {
+            a.run(Action::Usage);
+            a.run(Action::Palette);
+        }),
+        ("08-settings", |a| {
+            a.palette = None;
+            a.settings_open = true;
+        }),
+    ]
+}
+
 /// Interface preferences changed from Settings, remembered between launches.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -3733,6 +4013,11 @@ impl Prefs {
 
 /// Lets the user move the window by dragging empty chrome (needed with the
 /// unified macOS title bar). Double-click zooms, like a native title bar.
+/// Settings-row control: a switch bound to `on`; yields whether it changed.
+fn switch(on: &mut bool) -> impl FnOnce(&mut egui::Ui) -> bool + '_ {
+    move |ui| kit::toggle_switch(ui, on).changed()
+}
+
 fn window_drag_zone(
     ui: &mut egui::Ui,
     rect: egui::Rect,

@@ -273,6 +273,11 @@ pub fn apply_chrome(ctx: &egui::Context, high_contrast: bool) {
         s.spacing.menu_margin = egui::Margin::same(6);
         s.animation_time = 0.0; // no decorative motion
         s.interaction.selectable_labels = false;
+        s.interaction.tooltip_delay = 0.35;
+        // Thin scrollbars that float over content, as on macOS.
+        s.spacing.scroll = egui::style::ScrollStyle::floating();
+        s.spacing.scroll.bar_width = 6.0;
+        s.spacing.tooltip_width = 320.0;
     });
 }
 

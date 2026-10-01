@@ -54,11 +54,7 @@ pub fn limit_row(ui: &mut Ui, label: &str, w: Option<LimitWindow>, now: i64, red
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(label).size(12.0).color(t::TEXT_2));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new("waiting for data")
-                            .size(11.0)
-                            .color(t::TEXT_3),
-                    );
+                    ui.label(egui::RichText::new("—").size(11.0).color(t::TEXT_3));
                 });
             });
             limit_bar(ui, 0.0, t::BORDER, width);

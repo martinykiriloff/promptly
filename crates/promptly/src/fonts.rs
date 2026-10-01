@@ -109,5 +109,16 @@ pub fn install(ctx: &egui::Context) {
         .or_default()
         .extend(fallbacks);
     fonts.families.insert(FontFamily::Monospace, chain);
+    // Lucide icon font (ISC licence, see assets/LUCIDE-LICENSE.txt).
+    fonts.font_data.insert(
+        "lucide".into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/lucide.ttf"
+        ))),
+    );
+    fonts.families.insert(
+        FontFamily::Name(crate::ui_kit::ICON_FAMILY.into()),
+        vec!["lucide".into()],
+    );
     ctx.set_fonts(fonts);
 }

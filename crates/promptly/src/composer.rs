@@ -46,14 +46,6 @@ impl AttachKind {
             _ => AttachKind::File,
         }
     }
-    fn label(self) -> &'static str {
-        match self {
-            AttachKind::Image => "Image",
-            AttachKind::Pdf => "PDF",
-            AttachKind::Video => "Video",
-            AttachKind::File => "File",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -398,22 +390,16 @@ impl Composer {
         if let Some(c) = clip.filter(|c| Some(c.sig) != self.clip_ignored) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(format!(
-                                "Paste screenshot from clipboard ({}×{})",
-                                c.w, c.h
-                            ))
-                            .size(12.0),
-                        )
-                        .corner_radius(CornerRadius::same(12)),
-                    )
-                    .clicked()
+                if kit::secondary_button(
+                    ui,
+                    Some(Icon::Image),
+                    &format!("Attach screenshot from clipboard  ·  {}×{}", c.w, c.h),
+                )
+                .clicked()
                 {
                     self.paste_clipboard_image();
                 }
-                if ui.small_button("Not now").clicked() {
+                if kit::icon_button(ui, Icon::Close, "Not now", false).clicked() {
                     self.clip_ignored = Some(c.sig);
                 }
             });
@@ -432,12 +418,18 @@ impl Composer {
         let card = egui::Frame::new()
             .fill(t::BG_INPUT)
             .stroke(Stroke::new(1.0, t::BORDER))
-            .corner_radius(CornerRadius::same(10))
+            .corner_radius(CornerRadius::same(14))
             .inner_margin(egui::Margin {
-                left: 12,
+                left: 14,
                 right: 8,
-                top: 10,
+                top: 12,
                 bottom: 8,
+            })
+            .shadow(egui::Shadow {
+                offset: [0, 6],
+                blur: 18,
+                spread: 0,
+                color: egui::Color32::from_black_alpha(70),
             });
         let card_resp = card.show(ui, |ui| {
             // Attachment chips.
@@ -457,9 +449,9 @@ impl Composer {
                 ui.add_space(6.0);
             }
             let hint = if self.attachments.is_empty() {
-                format!("Message {target}…  / for commands and skills, @ for files")
+                format!("Message {target}")
             } else {
-                "Add a message, or press Enter to send the attachments".to_string()
+                "Add a message…".to_string()
             };
             let edit = egui::TextEdit::multiline(&mut self.text)
                 .id(id)
@@ -487,12 +479,19 @@ impl Composer {
             if text_has_focus && popup.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 action = Some(ComposerAction::FocusTerminal);
             }
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             let mut send_clicked = false;
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.menu_button(RichText::new("Attach").size(12.0).color(t::TEXT_2), |ui| {
-                    if ui.button("Choose files…").clicked() {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let attach = kit::icon_button(
+                    ui,
+                    Icon::Paperclip,
+                    "Attach files, screenshots, PDFs or video",
+                    false,
+                );
+                egui::Popup::menu(&attach).show(|ui| {
+                    ui.set_min_width(220.0);
+                    if menu_item(ui, Icon::File, "Choose files…") {
                         ui.close();
                         if let Some(files) = rfd::FileDialog::new()
                             .set_title("Attach files")
@@ -501,46 +500,48 @@ impl Composer {
                             self.attach(files);
                         }
                     }
-                    if ui.button("Paste image from clipboard").clicked() {
+                    if menu_item(ui, Icon::Image, "Paste image from clipboard") {
                         ui.close();
                         self.paste_clipboard_image();
                     }
-                    ui.separator();
+                    ui.add_space(2.0);
                     ui.label(
-                        RichText::new("Or drag files onto the window")
-                            .size(11.5)
+                        RichText::new("  You can also drop files on the window")
+                            .size(11.0)
                             .color(t::TEXT_3),
                     );
                 });
-                ui.menu_button(
-                    RichText::new("Snippets").size(12.0).color(t::TEXT_2),
-                    |ui| {
-                        for (name, body) in snippets {
-                            if ui.button(name).on_hover_text(body).clicked() {
-                                if !self.text.is_empty() && !self.text.ends_with('\n') {
-                                    self.text.push('\n');
-                                }
-                                self.text.push_str(body);
-                                self.focus_requested = true;
-                                ui.close();
+                let snip = kit::icon_button(ui, Icon::Quote, "Snippets", false);
+                egui::Popup::menu(&snip).show(|ui| {
+                    ui.set_min_width(220.0);
+                    for (name, body) in snippets {
+                        if menu_item(ui, Icon::Quote, name) {
+                            if !self.text.is_empty() && !self.text.ends_with('\n') {
+                                self.text.push('\n');
                             }
+                            self.text.push_str(body);
+                            self.focus_requested = true;
+                            ui.close();
                         }
-                    },
-                );
-                ui.label(
-                    RichText::new("⇧↵ new line  ⌃↑↓ history")
-                        .size(11.0)
-                        .color(t::TEXT_3),
-                );
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(RichText::new("/").size(11.5).strong().color(t::TEXT_2))
+                    .on_hover_text("Commands and skills");
+                ui.label(RichText::new("commands").size(11.5).color(t::TEXT_3));
+                ui.add_space(8.0);
+                ui.label(RichText::new("@").size(11.5).strong().color(t::TEXT_2))
+                    .on_hover_text("Mention a file");
+                ui.label(RichText::new("files").size(11.5).color(t::TEXT_3));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can_send = !self.text.trim().is_empty() || !self.attachments.is_empty();
-                    ui.add_enabled_ui(can_send, |ui| {
-                        if kit::primary_button(ui, Some(Icon::Send), "Send", Some("↵"), false)
-                            .clicked()
-                        {
-                            send_clicked = true;
-                        }
-                    });
+                    if kit::send_button(ui, can_send).clicked() {
+                        send_clicked = true;
+                    }
+                    if text_has_focus {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("⇧↵ new line").size(11.0).color(t::TEXT_3));
+                    }
                 });
             });
             send_clicked
@@ -548,8 +549,8 @@ impl Composer {
         if text_has_focus {
             ui.painter().rect_stroke(
                 card_resp.response.rect,
-                CornerRadius::same(10),
-                Stroke::new(1.0, t::ACCENT.gamma_multiply(0.8)),
+                CornerRadius::same(14),
+                Stroke::new(1.0, t::BORDER_STRONG.gamma_multiply(1.6)),
                 egui::StrokeKind::Inside,
             );
         }
@@ -714,46 +715,64 @@ impl Composer {
     }
 }
 
-/// A removable attachment chip: kind, file name, size.
+/// A removable attachment chip: kind icon, file name, size.
 fn attachment_chip(ui: &mut egui::Ui, a: &Attachment) -> egui::Response {
     let name = a
         .path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let label = format!("{}  {}  {}", a.kind.label(), name, human_size(a.bytes));
     let font = FontId::proportional(12.0);
-    let g = ui.fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), t::TEXT_1));
-    let w = g.size().x.min(320.0) + 40.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
-    let col = match a.kind {
-        AttachKind::Image => theme::BLUE,
-        AttachKind::Pdf => theme::RED,
-        AttachKind::Video => theme::AMBER,
-        AttachKind::File => t::TEXT_2,
+    let size = human_size(a.bytes);
+    let name_w = ui
+        .fonts_mut(|f| f.layout_no_wrap(name.clone(), font.clone(), t::TEXT_1))
+        .size()
+        .x
+        .min(240.0);
+    let size_w = ui
+        .fonts_mut(|f| f.layout_no_wrap(size.clone(), FontId::proportional(11.0), t::TEXT_3))
+        .size()
+        .x;
+    let w = 30.0 + name_w + 8.0 + size_w + 30.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+    let h = kit::hover_t(ui, &resp);
+    let (icon, col) = match a.kind {
+        AttachKind::Image => (Icon::Image, theme::BLUE),
+        AttachKind::Pdf => (Icon::FileText, theme::RED),
+        AttachKind::Video => (Icon::Film, theme::AMBER),
+        AttachKind::File => (Icon::File, t::TEXT_2),
     };
     ui.painter().rect(
         rect,
-        CornerRadius::same(13),
-        col.gamma_multiply(0.12),
-        Stroke::new(1.0, col.gamma_multiply(0.35)),
+        CornerRadius::same(8),
+        kit::mix(t::BG_ELEVATED, t::BG_ELEVATED_2, h),
+        Stroke::new(1.0, t::BORDER),
         egui::StrokeKind::Inside,
     );
-    let g = kit::elide(ui, &label, font, t::TEXT_1, w - 40.0);
+    kit::paint_icon(
+        ui,
+        egui::Rect::from_center_size(pos2(rect.min.x + 16.0, rect.center().y), vec2(14.0, 14.0)),
+        icon,
+        col,
+    );
+    let g = kit::elide(ui, &name, font, t::TEXT_1, name_w);
     ui.painter().galley(
-        pos2(rect.min.x + 12.0, rect.center().y - g.size().y / 2.0),
+        pos2(rect.min.x + 30.0, rect.center().y - g.size().y / 2.0),
         g,
         t::TEXT_1,
     );
-    let x = pos2(rect.max.x - 14.0, rect.center().y);
-    let xc = if resp.hovered() { t::TEXT } else { t::TEXT_3 };
-    ui.painter().line_segment(
-        [x + vec2(-3.5, -3.5), x + vec2(3.5, 3.5)],
-        Stroke::new(1.4, xc),
+    ui.painter().text(
+        pos2(rect.min.x + 30.0 + name_w + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        size,
+        FontId::proportional(11.0),
+        t::TEXT_3,
     );
-    ui.painter().line_segment(
-        [x + vec2(3.5, -3.5), x + vec2(-3.5, 3.5)],
-        Stroke::new(1.4, xc),
+    kit::paint_icon(
+        ui,
+        egui::Rect::from_center_size(pos2(rect.max.x - 15.0, rect.center().y), vec2(12.0, 12.0)),
+        Icon::Close,
+        kit::mix(t::TEXT_3, t::TEXT, h),
     );
     let hover = match a.kind {
         AttachKind::Video => {
@@ -763,6 +782,32 @@ fn attachment_chip(ui: &mut egui::Ui, a: &Attachment) -> egui::Response {
     };
     resp.on_hover_text(format!("{}\n{hover}", a.path.display()))
         .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Popup menu row with a leading icon.
+fn menu_item(ui: &mut egui::Ui, icon: Icon, label: &str) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    let h = kit::hover_t(ui, &resp);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(6),
+        kit::mix(egui::Color32::TRANSPARENT, t::HOVER, h),
+    );
+    kit::paint_icon(
+        ui,
+        egui::Rect::from_center_size(pos2(rect.min.x + 15.0, rect.center().y), vec2(14.0, 14.0)),
+        icon,
+        t::TEXT_2,
+    );
+    ui.painter().text(
+        pos2(rect.min.x + 32.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.0),
+        t::TEXT,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }
 
 fn human_size(b: u64) -> String {

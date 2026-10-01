@@ -11,6 +11,8 @@ mod pty;
 mod review;
 mod session;
 mod shell_integration;
+#[cfg(test)]
+mod shots;
 mod term_view;
 mod theme;
 mod ui_kit;

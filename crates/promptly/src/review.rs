@@ -403,40 +403,54 @@ impl ReviewState {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                // Group by directory so each folder appears once.
+                let mut order: Vec<usize> = (0..d.files.len()).collect();
+                order.sort_by_cached_key(|&i| split_path(&d.files[i].path));
                 let mut last_dir: Option<String> = None;
-                for (fi, f) in d.files.iter().enumerate() {
+                for fi in order {
+                    let f = &d.files[fi];
                     let (dir, name) = split_path(&f.path);
                     if last_dir.as_deref() != Some(dir.as_str()) {
                         if !dir.is_empty() {
                             let (r, _) = ui.allocate_exact_size(
-                                vec2(ui.available_width(), 24.0),
+                                vec2(ui.available_width(), 26.0),
                                 Sense::hover(),
+                            );
+                            kit::paint_icon(
+                                ui,
+                                Rect::from_center_size(
+                                    pos2(r.min.x + 10.0, r.center().y + 2.0),
+                                    vec2(12.0, 12.0),
+                                ),
+                                kit::Icon::ChevronDown,
+                                t::TEXT_3,
                             );
                             let g = kit::elide(
                                 ui,
-                                &dir,
+                                dir.trim_end_matches('/'),
                                 FontId::proportional(11.5),
-                                t::TEXT_3,
-                                r.width() - 8.0,
+                                t::TEXT_2,
+                                r.width() - 26.0,
                             );
                             ui.painter().galley(
-                                pos2(r.min.x + 4.0, r.center().y - g.size().y / 2.0),
+                                pos2(r.min.x + 20.0, r.center().y + 2.0 - g.size().y / 2.0),
                                 g,
-                                t::TEXT_3,
+                                t::TEXT_2,
                             );
                         }
                         last_dir = Some(dir.clone());
                     }
-                    let indent = if dir.is_empty() { 4.0 } else { 14.0 };
+                    let indent = if dir.is_empty() { 6.0 } else { 20.0 };
                     let (r, resp) =
                         ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
                     let selected = self.selected == Some(fi);
-                    if selected {
-                        ui.painter()
-                            .rect_filled(r, CornerRadius::same(6), t::ACTIVE);
-                    } else if resp.hovered() {
-                        ui.painter().rect_filled(r, CornerRadius::same(6), t::HOVER);
-                    }
+                    let h = kit::hover_t(ui, &resp);
+                    let bg = if selected {
+                        t::ACTIVE
+                    } else {
+                        kit::mix(Color32::TRANSPARENT, t::HOVER, h)
+                    };
+                    ui.painter().rect_filled(r, CornerRadius::same(6), bg);
                     let viewed = self.viewed.contains(&f.path);
                     let (letter, col) = status_style(f.status);
                     let p = ui.painter();
@@ -466,18 +480,19 @@ impl ReviewState {
                         g,
                         name_col,
                     );
-                    let right = if viewed {
-                        "✓".to_string()
+                    if viewed {
+                        kit::paint_icon(
+                            ui,
+                            Rect::from_center_size(
+                                pos2(r.max.x - 12.0, r.center().y),
+                                vec2(13.0, 13.0),
+                            ),
+                            kit::Icon::Check,
+                            t::TEXT_3,
+                        );
                     } else {
-                        format!("+{} −{}", f.added, f.removed)
-                    };
-                    ui.painter().text(
-                        pos2(r.max.x - 6.0, r.center().y),
-                        egui::Align2::RIGHT_CENTER,
-                        right,
-                        FontId::proportional(11.0),
-                        if viewed { theme::GREEN } else { t::TEXT_3 },
-                    );
+                        diff_stat(ui, pos2(r.max.x - 6.0, r.center().y), f.added, f.removed);
+                    }
                     if resp
                         .on_hover_text(&f.path)
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -836,29 +851,24 @@ impl ReviewState {
         let mut click = None;
 
         // Chevron + path area toggles folding.
-        let fold_r = Rect::from_min_max(r.min, pos2(r.max.x - 190.0, r.max.y));
+        let fold_r = Rect::from_min_max(r.min, pos2(r.max.x - 140.0, r.max.y));
         let fold = ui.interact(fold_r, id.with("fold"), Sense::click());
         let cx = r.min.x + 16.0;
         let cy = r.center().y;
-        let chev = if folded {
-            vec![
-                pos2(cx - 3.0, cy - 5.0),
-                pos2(cx + 3.0, cy),
-                pos2(cx - 3.0, cy + 5.0),
-            ]
-        } else {
-            vec![
-                pos2(cx - 5.0, cy - 3.0),
-                pos2(cx, cy + 3.0),
-                pos2(cx + 5.0, cy - 3.0),
-            ]
-        };
-        ui.painter()
-            .add(egui::Shape::line(chev, Stroke::new(1.6, t::TEXT_2)));
+        kit::paint_icon(
+            ui,
+            Rect::from_center_size(pos2(cx, cy), vec2(14.0, 14.0)),
+            if folded {
+                kit::Icon::ChevronRight
+            } else {
+                kit::Icon::ChevronDown
+            },
+            t::TEXT_2,
+        );
         let (letter, col) = status_style(f.status);
         let badge = Rect::from_center_size(pos2(r.min.x + 40.0, cy), vec2(18.0, 18.0));
         ui.painter()
-            .rect_filled(badge, CornerRadius::same(4), col.gamma_multiply(0.18));
+            .rect_filled(badge, CornerRadius::same(5), col.gamma_multiply(0.14));
         ui.painter().text(
             badge.center(),
             egui::Align2::CENTER_CENTER,
@@ -903,28 +913,22 @@ impl ReviewState {
 
         // +N −M and the five-block bar, like GitHub.
         let stat_x = r.min.x + 66.0 + gw;
-        let stat = format!("+{} −{}", f.added, f.removed);
-        ui.painter().text(
-            pos2(stat_x, cy),
-            egui::Align2::LEFT_CENTER,
-            &stat,
-            FontId::proportional(11.5),
-            t::TEXT_2,
-        );
-        let blocks_x = stat_x + stat.len() as f32 * 6.4 + 8.0;
+        let stat_w = diff_stat_width(ui, f.added, f.removed);
+        diff_stat(ui, pos2(stat_x + stat_w, cy), f.added, f.removed);
+        let blocks_x = stat_x + stat_w + 8.0;
         let total = (f.added + f.removed).max(1) as f32;
         let green = ((f.added as f32 / total) * 5.0).round() as usize;
         let red = if f.removed > 0 { (5 - green).max(1) } else { 0 };
         for b in 0..5 {
             let c = if b < green {
-                theme::GREEN
+                theme::GREEN.gamma_multiply(0.85)
             } else if b < green + red {
-                theme::RED
+                theme::RED.gamma_multiply(0.85)
             } else {
                 t::BORDER_STRONG
             };
             ui.painter().rect_filled(
-                Rect::from_min_size(pos2(blocks_x + b as f32 * 9.0, cy - 4.0), vec2(8.0, 8.0)),
+                Rect::from_min_size(pos2(blocks_x + b as f32 * 8.0, cy - 3.5), vec2(7.0, 7.0)),
                 CornerRadius::same(2),
                 c,
             );
@@ -936,80 +940,68 @@ impl ReviewState {
             click = Some(RowClick::ToggleFold(fi));
         }
 
-        // Viewed checkbox.
-        let vr = Rect::from_min_size(pos2(r.max.x - 182.0, cy - 13.0), vec2(84.0, 26.0));
+        // Viewed checkbox: borderless until hovered.
+        let vr = Rect::from_min_size(pos2(r.max.x - 132.0, cy - 13.0), vec2(84.0, 26.0));
         let vresp = ui.interact(vr, id.with("viewed"), Sense::click());
-        let fill = if viewed {
-            theme::BLUE.gamma_multiply(0.22)
-        } else if vresp.hovered() {
-            t::HOVER
-        } else {
-            Color32::TRANSPARENT
-        };
-        ui.painter().rect(
+        let vh = kit::hover_t(ui, &vresp);
+        ui.painter().rect_filled(
             vr,
             CornerRadius::same(6),
-            fill,
+            kit::mix(Color32::TRANSPARENT, t::HOVER, vh),
+        );
+        let box_r = Rect::from_center_size(pos2(vr.min.x + 15.0, cy), vec2(14.0, 14.0));
+        ui.painter().rect(
+            box_r,
+            CornerRadius::same(4),
+            if viewed {
+                t::ACCENT
+            } else {
+                Color32::TRANSPARENT
+            },
             Stroke::new(
-                1.0,
+                1.2,
                 if viewed {
-                    theme::BLUE.gamma_multiply(0.6)
+                    t::ACCENT
                 } else {
-                    t::BORDER_STRONG
+                    kit::mix(t::TEXT_3, t::TEXT_2, vh)
                 },
             ),
             egui::StrokeKind::Inside,
         );
-        let box_r = Rect::from_center_size(pos2(vr.min.x + 15.0, cy), vec2(12.0, 12.0));
-        ui.painter().rect(
-            box_r,
-            CornerRadius::same(3),
-            if viewed {
-                theme::BLUE
-            } else {
-                Color32::TRANSPARENT
-            },
-            Stroke::new(1.2, if viewed { theme::BLUE } else { t::TEXT_2 }),
-            egui::StrokeKind::Inside,
-        );
         if viewed {
-            ui.painter().add(egui::Shape::line(
-                vec![
-                    pos2(box_r.min.x + 2.5, cy),
-                    pos2(box_r.min.x + 5.0, cy + 2.8),
-                    pos2(box_r.max.x - 2.0, cy - 3.0),
-                ],
-                Stroke::new(1.6, Color32::WHITE),
-            ));
+            kit::paint_icon(ui, box_r.shrink(2.0), kit::Icon::Check, Color32::WHITE);
         }
         ui.painter().text(
-            pos2(vr.min.x + 28.0, cy),
+            pos2(vr.min.x + 29.0, cy),
             egui::Align2::LEFT_CENTER,
             "Viewed",
             FontId::proportional(12.0),
-            if viewed { t::TEXT } else { t::TEXT_2 },
+            if viewed { t::TEXT_1 } else { t::TEXT_2 },
         );
         if vresp
             .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Mark as viewed and fold")
             .clicked()
         {
             click = Some(RowClick::ToggleViewed(fi));
         }
 
         // Open in editor.
-        let or = Rect::from_min_size(pos2(r.max.x - 92.0, cy - 13.0), vec2(80.0, 26.0));
+        let or = Rect::from_min_size(pos2(r.max.x - 40.0, cy - 13.0), vec2(28.0, 26.0));
         let oresp = ui.interact(or, id.with("open"), Sense::click());
-        if oresp.hovered() {
-            ui.painter()
-                .rect_filled(or, CornerRadius::same(6), t::HOVER);
-        }
-        ui.painter().text(
-            or.center(),
-            egui::Align2::CENTER_CENTER,
-            "Open file",
-            FontId::proportional(12.0),
-            t::TEXT_2,
+        let oh = kit::hover_t(ui, &oresp);
+        ui.painter().rect_filled(
+            or,
+            CornerRadius::same(6),
+            kit::mix(Color32::TRANSPARENT, t::HOVER, oh),
         );
+        kit::paint_icon(
+            ui,
+            or.shrink2(vec2(7.0, 6.5)),
+            kit::Icon::External,
+            kit::mix(t::TEXT_2, t::TEXT, oh),
+        );
+        let oresp = oresp.on_hover_text("Open in editor");
         if f.status != FileStatus::Deleted
             && oresp
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1195,20 +1187,16 @@ fn paint_line(
     };
     let (bg, fg, sign) = match l.kind {
         LineKind::Added => (
-            Color32::from_rgba_unmultiplied(0x3f, 0xb9, 0x50, 30),
-            Color32::from_rgb(0xc3, 0xe8, 0xca),
+            Color32::from_rgba_unmultiplied(0x3f, 0xb9, 0x50, 16),
+            t::TEXT_1,
             "+",
         ),
         LineKind::Removed => (
-            Color32::from_rgba_unmultiplied(0xe5, 0x53, 0x4b, 30),
-            Color32::from_rgb(0xf3, 0xc0, 0xbc),
+            Color32::from_rgba_unmultiplied(0xe5, 0x53, 0x4b, 16),
+            t::TEXT_1,
             "−",
         ),
-        LineKind::Hunk => (
-            Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xf6, 22),
-            Color32::from_rgb(0x8f, 0xb8, 0xfb),
-            "",
-        ),
+        LineKind::Hunk => (t::BG_SIDEBAR, t::TEXT_3, ""),
         LineKind::Meta => (t::BG_MAIN, t::TEXT_3, ""),
         LineKind::Context => (t::BG_MAIN, t::TEXT_2, " "),
     };
@@ -1227,8 +1215,23 @@ fn paint_line(
         p.rect_filled(
             Rect::from_min_size(rect.min, vec2(gutter - 8.0, rect.height())),
             0.0,
-            Color32::from_black_alpha(40),
+            Color32::from_black_alpha(28),
         );
+        let edge = match l.kind {
+            LineKind::Added => Some(theme::GREEN),
+            LineKind::Removed => Some(theme::RED),
+            _ => None,
+        };
+        if let Some(c) = edge {
+            p.rect_filled(
+                Rect::from_min_size(
+                    pos2(rect.min.x + gutter - 10.0, rect.min.y),
+                    vec2(2.0, rect.height()),
+                ),
+                0.0,
+                c.gamma_multiply(0.8),
+            );
+        }
         if let Some(n) = l.old_no {
             p.text(
                 pos2(rect.min.x + 38.0, rect.center().y),
@@ -1255,10 +1258,22 @@ fn paint_line(
             t::ACCENT_HOVER,
         );
     }
+    let sign_col = match l.kind {
+        LineKind::Added => theme::GREEN,
+        LineKind::Removed => theme::RED,
+        _ => t::TEXT_3,
+    };
     let text = if l.kind == LineKind::Hunk {
         l.text.clone()
     } else {
-        format!("{sign} {}", l.text.replace('\t', "    "))
+        p.text(
+            pos2(rect.min.x + gutter, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            sign,
+            mono.clone(),
+            sign_col,
+        );
+        format!("  {}", l.text.replace('\t', "    "))
     };
     let x = if l.kind == LineKind::Hunk {
         rect.min.x + 12.0
@@ -1271,6 +1286,48 @@ fn paint_line(
         text,
         mono,
         fg,
+    );
+}
+
+fn diff_stat_text(added: u32, removed: u32) -> (String, String) {
+    (format!("+{added}"), format!("−{removed}"))
+}
+
+fn diff_stat_width(ui: &egui::Ui, added: u32, removed: u32) -> f32 {
+    let (a, r) = diff_stat_text(added, removed);
+    let f = FontId::proportional(11.5);
+    ui.fonts_mut(|fo| {
+        fo.layout_no_wrap(a, f.clone(), t::TEXT).size().x
+            + 6.0
+            + fo.layout_no_wrap(r, f, t::TEXT).size().x
+    })
+}
+
+/// "+12 −3" in green and red, right-aligned at `right`.
+fn diff_stat(ui: &egui::Ui, right: egui::Pos2, added: u32, removed: u32) {
+    let (a, r) = diff_stat_text(added, removed);
+    let f = FontId::proportional(11.5);
+    let rr = ui.painter().text(
+        right,
+        egui::Align2::RIGHT_CENTER,
+        r,
+        f.clone(),
+        if removed == 0 {
+            t::TEXT_3
+        } else {
+            theme::RED.gamma_multiply(0.9)
+        },
+    );
+    ui.painter().text(
+        pos2(rr.min.x - 6.0, right.y),
+        egui::Align2::RIGHT_CENTER,
+        a,
+        f,
+        if added == 0 {
+            t::TEXT_3
+        } else {
+            theme::GREEN.gamma_multiply(0.9)
+        },
     );
 }
 

@@ -1,12 +1,19 @@
-//! Small design system: vector icons, buttons, rows, pills and keycaps.
-//! Everything is painted directly so hit targets cover the whole control
-//! and text never steals clicks.
+//! Promptly's design kit. One icon family (Lucide), one set of radii
+//! (7 controls, 10 cards, 14 sheets), eased hover states, and controls that
+//! feel at home on macOS. Everything is painted directly so hit targets
+//! cover the whole control and text never steals clicks.
 
-use egui::{Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, Ui, pos2, vec2};
+use egui::{
+    Align2, Color32, CornerRadius, FontFamily, FontId, Rect, Response, Sense, Stroke, Ui, pos2,
+    vec2,
+};
 
 use crate::theme::tokens as t;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Font family holding the Lucide icon glyphs (registered in `fonts.rs`).
+pub const ICON_FAMILY: &str = "icons";
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     Sparkle,
     Terminal,
@@ -23,170 +30,108 @@ pub enum Icon {
     Refresh,
     Chart,
     Thought,
+    Plus,
+    Paperclip,
+    Quote,
+    External,
+    Check,
+    ChevronDown,
+    ChevronRight,
+    Eye,
+    Image,
+    FileText,
+    Film,
+    File,
 }
 
-/// Paint an icon centered in `rect` with 1.5 px strokes on a 16 px grid.
-pub fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
-    let p = ui.painter();
-    let s = rect.width().min(rect.height()) / 16.0;
-    let c = rect.center();
-    let at = |x: f32, y: f32| pos2(c.x + (x - 8.0) * s, c.y + (y - 8.0) * s);
-    let st = Stroke::new(1.5 * s.max(1.0), color);
-    let line = |a: (f32, f32), b: (f32, f32)| p.line_segment([at(a.0, a.1), at(b.0, b.1)], st);
-    match icon {
-        Icon::Sparkle => {
-            // Claude-like burst: four long and four short rays.
-            for i in 0..8 {
-                let a = i as f32 * std::f32::consts::FRAC_PI_4;
-                let r = if i % 2 == 0 { 6.0 } else { 4.0 };
-                line(
-                    (8.0 + a.cos() * 1.6, 8.0 + a.sin() * 1.6),
-                    (8.0 + a.cos() * r, 8.0 + a.sin() * r),
-                );
-            }
-        }
-        Icon::Terminal => {
-            p.rect_stroke(
-                Rect::from_min_max(at(2.0, 3.0), at(14.0, 13.0)),
-                2.0 * s,
-                st,
-                egui::StrokeKind::Middle,
-            );
-            line((5.0, 6.5), (7.0, 8.0));
-            line((7.0, 8.0), (5.0, 9.5));
-            line((8.5, 10.0), (11.0, 10.0));
-        }
-        Icon::Clock => {
-            p.circle_stroke(c, 5.8 * s, st);
-            line((8.0, 5.0), (8.0, 8.0));
-            line((8.0, 8.0), (10.2, 9.4));
-        }
-        Icon::Grid => {
-            for (x, y) in [(2.5, 2.5), (9.0, 2.5), (2.5, 9.0), (9.0, 9.0)] {
-                p.rect_stroke(
-                    Rect::from_min_max(at(x, y), at(x + 4.5, y + 4.5)),
-                    1.2 * s,
-                    st,
-                    egui::StrokeKind::Middle,
-                );
-            }
-        }
-        Icon::Sliders => {
-            // Gear: ring, hub and eight teeth.
-            p.circle_stroke(c, 4.2 * s, st);
-            p.circle_stroke(c, 1.6 * s, st);
-            for i in 0..8 {
-                let a = i as f32 * std::f32::consts::FRAC_PI_4;
-                line(
-                    (8.0 + a.cos() * 4.6, 8.0 + a.sin() * 4.6),
-                    (8.0 + a.cos() * 6.4, 8.0 + a.sin() * 6.4),
-                );
-            }
-        }
-        Icon::PanelRight => {
-            p.rect_stroke(
-                Rect::from_min_max(at(2.0, 3.0), at(14.0, 13.0)),
-                2.0 * s,
-                st,
-                egui::StrokeKind::Middle,
-            );
-            line((9.5, 3.0), (9.5, 13.0));
-        }
-        Icon::Compose => {
-            p.rect_stroke(
-                Rect::from_min_max(at(2.0, 4.0), at(14.0, 13.0)),
-                2.0 * s,
-                st,
-                egui::StrokeKind::Middle,
-            );
-            line((5.0, 7.5), (11.0, 7.5));
-            line((5.0, 10.0), (8.5, 10.0));
-        }
-        Icon::Branch => {
-            p.circle_stroke(at(5.0, 3.8), 1.6 * s, st);
-            p.circle_stroke(at(5.0, 12.2), 1.6 * s, st);
-            p.circle_stroke(at(11.0, 5.5), 1.6 * s, st);
-            line((5.0, 5.4), (5.0, 10.6));
-            let pts = [at(11.0, 7.1), at(11.0, 8.6), at(5.0, 10.2)];
-            p.add(egui::Shape::line(pts.to_vec(), st));
-        }
-        Icon::Close => {
-            line((4.0, 4.0), (12.0, 12.0));
-            line((12.0, 4.0), (4.0, 12.0));
-        }
-        Icon::Fork => {
-            p.circle_stroke(at(8.0, 13.0), 1.6 * s, st);
-            p.circle_stroke(at(3.5, 3.5), 1.6 * s, st);
-            p.circle_stroke(at(8.0, 3.5), 1.6 * s, st);
-            p.circle_stroke(at(12.5, 3.5), 1.6 * s, st);
-            line((8.0, 5.1), (8.0, 11.4));
-            line((3.5, 5.1), (8.0, 9.0));
-            line((12.5, 5.1), (8.0, 9.0));
-        }
-        Icon::Search => {
-            p.circle_stroke(at(7.0, 7.0), 4.3 * s, st);
-            line((10.2, 10.2), (13.5, 13.5));
-        }
-        Icon::Send => {
-            line((8.0, 13.0), (8.0, 3.5));
-            line((4.0, 7.5), (8.0, 3.5));
-            line((12.0, 7.5), (8.0, 3.5));
-        }
-        Icon::Thought => {
-            // Thought bubble: a rounded cloud with two trailing dots.
-            p.rect_stroke(
-                Rect::from_min_max(at(2.0, 2.5), at(14.0, 10.5)),
-                4.0 * s,
-                st,
-                egui::StrokeKind::Middle,
-            );
-            p.circle_filled(at(5.0, 12.6), 1.2 * s, color);
-            p.circle_filled(at(3.2, 14.4), 0.8 * s, color);
-            for x in [5.5, 8.0, 10.5] {
-                p.circle_filled(at(x, 6.5), 0.9 * s, color);
-            }
-        }
-        Icon::Chart => {
-            line((2.5, 13.5), (13.5, 13.5));
-            for (x, h) in [(4.5, 4.0), (8.0, 8.5), (11.5, 6.0)] {
-                p.rect_filled(
-                    Rect::from_min_max(at(x - 1.2, 13.5 - h), at(x + 1.2, 13.0)),
-                    CornerRadius::same(1),
-                    color,
-                );
-            }
-        }
-        Icon::Refresh => {
-            let pts: Vec<_> = (0..=20)
-                .map(|i| {
-                    let a = -0.6 + i as f32 / 20.0 * 5.0;
-                    at(8.0 + a.cos() * 5.0, 8.0 + a.sin() * 5.0)
-                })
-                .collect();
-            p.add(egui::Shape::line(pts, st));
-            line((12.5, 2.8), (12.6, 5.6));
-            line((12.6, 5.6), (9.8, 5.4));
-        }
+impl Icon {
+    /// Lucide code point (lucide-static 0.544.0).
+    pub fn glyph(self) -> char {
+        let code = match self {
+            Icon::Sparkle => 0xe416,
+            Icon::Terminal => 0xe181,
+            Icon::Clock => 0xe1f5, // history
+            Icon::Grid => 0xe0ff,
+            Icon::Sliders => 0xe29a,
+            Icon::PanelRight => 0xe435,
+            Icon::Compose => 0xe172,
+            Icon::Branch => 0xe0e2,
+            Icon::Close => 0xe1b2,
+            Icon::Fork => 0xe28d,
+            Icon::Search => 0xe151,
+            Icon::Send => 0xe04a, // arrow-up
+            Icon::Refresh => 0xe145,
+            Icon::Chart => 0xe2a3,
+            Icon::Thought => 0xe3ca, // brain
+            Icon::Plus => 0xe13d,
+            Icon::Paperclip => 0xe12d,
+            Icon::Quote => 0xe239,
+            Icon::External => 0xe0b9,
+            Icon::Check => 0xe06c,
+            Icon::ChevronDown => 0xe06d,
+            Icon::ChevronRight => 0xe06f,
+            Icon::Eye => 0xe0ba,
+            Icon::Image => 0xe0f6,
+            Icon::FileText => 0xe0cc,
+            Icon::Film => 0xe0d0,
+            Icon::File => 0xe0c0,
+        };
+        char::from_u32(code).unwrap_or('?')
     }
 }
 
-/// Square, frameless icon button with hover/active backgrounds.
+pub fn icon_font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(ICON_FAMILY.into()))
+}
+
+/// Paint an icon centred in `rect`, sized to the rect's smaller side.
+pub fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
+    let size = rect.width().min(rect.height());
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icon.glyph(),
+        icon_font(size),
+        color,
+    );
+}
+
+/// Eased 0..1 hover amount for a control (120 ms).
+pub fn hover_t(ui: &Ui, resp: &Response) -> f32 {
+    ui.ctx()
+        .animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.12)
+}
+
+pub fn mix(a: Color32, b: Color32, k: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * k).round() as u8;
+    Color32::from_rgba_premultiplied(
+        l(a.r(), b.r()),
+        l(a.g(), b.g()),
+        l(a.b(), b.b()),
+        l(a.a(), b.a()),
+    )
+}
+
+fn text_w(ui: &Ui, text: &str, font: FontId) -> f32 {
+    ui.fonts_mut(|f| f.layout_no_wrap(text.into(), font, t::TEXT).size().x)
+}
+
+/// Square, frameless icon button with an eased hover.
 pub fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str, active: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+    let h = hover_t(ui, &resp);
     let bg = if active {
         t::ACTIVE
-    } else if resp.hovered() {
-        t::HOVER
     } else {
-        Color32::TRANSPARENT
+        mix(Color32::TRANSPARENT, t::HOVER, h)
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
-    let fg = if active || resp.hovered() {
+    ui.painter().rect_filled(rect, CornerRadius::same(7), bg);
+    let fg = if active {
         t::TEXT
     } else {
-        t::TEXT_2
+        mix(t::TEXT_2, t::TEXT, h)
     };
-    paint_icon(ui, rect.shrink(6.0), icon, fg);
+    paint_icon(ui, rect.shrink(7.0), icon, fg);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(tooltip)
 }
@@ -200,104 +145,191 @@ pub fn primary_button(
     full_width: bool,
 ) -> Response {
     let font = FontId::proportional(13.0);
-    let text_w = ui.fonts_mut(|f| {
-        f.layout_no_wrap(label.into(), font.clone(), t::TEXT)
-            .size()
-            .x
-    });
+    let sc_font = FontId::proportional(11.5);
     let sc_w = shortcut
-        .map(|sc| {
-            ui.fonts_mut(|f| {
-                f.layout_no_wrap(sc.into(), FontId::proportional(11.5), t::TEXT)
-                    .size()
-                    .x
-            }) + 12.0
-        })
+        .map(|sc| text_w(ui, sc, sc_font.clone()) + 12.0)
         .unwrap_or(0.0);
     let w = if full_width {
         ui.available_width()
     } else {
-        text_w + sc_w + if icon.is_some() { 44.0 } else { 24.0 }
+        text_w(ui, label, font.clone()) + sc_w + if icon.is_some() { 46.0 } else { 26.0 }
     };
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
-    let fill = if resp.is_pointer_button_down_on() {
+    let h = hover_t(ui, &resp);
+    let enabled = ui.is_enabled();
+    let fill = if !enabled {
+        t::BG_ELEVATED_2
+    } else if resp.is_pointer_button_down_on() {
         t::ACCENT_PRESSED
-    } else if resp.hovered() {
-        t::ACCENT_HOVER
     } else {
-        t::ACCENT
+        mix(t::ACCENT, t::ACCENT_HOVER, h)
     };
     ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
-    let mut x = rect.min.x + 12.0;
+    if enabled {
+        // Hairline top highlight, like a native push button.
+        ui.painter().line_segment(
+            [
+                rect.left_top() + vec2(6.0, 0.5),
+                rect.right_top() + vec2(-6.0, 0.5),
+            ],
+            Stroke::new(1.0, Color32::from_white_alpha(36)),
+        );
+    }
+    let fg = if enabled { Color32::WHITE } else { t::TEXT_3 };
+    let mut x = rect.min.x + 13.0;
     if let Some(i) = icon {
         paint_icon(
             ui,
             Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0)),
             i,
-            Color32::WHITE,
+            fg,
         );
-        x += 20.0;
+        x += 21.0;
     }
     ui.painter().text(
         pos2(x, rect.center().y),
         Align2::LEFT_CENTER,
         label,
         font,
-        Color32::WHITE,
+        fg,
     );
     if let Some(sc) = shortcut {
         ui.painter().text(
-            pos2(rect.max.x - 10.0, rect.center().y),
+            pos2(rect.max.x - 11.0, rect.center().y),
             Align2::RIGHT_CENTER,
             sc,
-            FontId::proportional(11.5),
-            Color32::from_white_alpha(170),
+            sc_font,
+            Color32::from_white_alpha(150),
         );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Quiet text button: icon + label, hover background only.
-pub fn ghost_button(ui: &mut Ui, icon: Icon, label: &str, shortcut: Option<&str>) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
-    if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(6), t::HOVER);
+/// Quiet bordered button for secondary actions.
+pub fn secondary_button(ui: &mut Ui, icon: Option<Icon>, label: &str) -> Response {
+    let font = FontId::proportional(12.5);
+    let w = text_w(ui, label, font.clone()) + if icon.is_some() { 42.0 } else { 24.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    let h = hover_t(ui, &resp);
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(7),
+        mix(t::BG_ELEVATED, t::BG_ELEVATED_2, h),
+        Stroke::new(1.0, mix(t::BORDER, t::BORDER_STRONG, h)),
+        egui::StrokeKind::Inside,
+    );
+    let fg = mix(t::TEXT_1, t::TEXT, h);
+    let mut x = rect.min.x + 12.0;
+    if let Some(i) = icon {
+        paint_icon(
+            ui,
+            Rect::from_center_size(pos2(x + 6.5, rect.center().y), vec2(13.0, 13.0)),
+            i,
+            fg,
+        );
+        x += 19.0;
     }
-    let fg = if resp.hovered() { t::TEXT } else { t::TEXT_2 };
+    ui.painter().text(
+        pos2(x, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        font,
+        fg,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Quiet sidebar action row: icon + label; the shortcut fades in on hover.
+pub fn ghost_button(ui: &mut Ui, icon: Icon, label: &str, shortcut: Option<&str>) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    let h = hover_t(ui, &resp);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(7),
+        mix(Color32::TRANSPARENT, t::HOVER, h),
+    );
+    let fg = mix(t::TEXT_2, t::TEXT, h);
     paint_icon(
         ui,
-        Rect::from_center_size(pos2(rect.min.x + 16.0, rect.center().y), vec2(14.0, 14.0)),
+        Rect::from_center_size(pos2(rect.min.x + 18.0, rect.center().y), vec2(15.0, 15.0)),
         icon,
         fg,
     );
     ui.painter().text(
-        pos2(rect.min.x + 32.0, rect.center().y),
+        pos2(rect.min.x + 36.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
         FontId::proportional(13.0),
         fg,
     );
-    if let Some(sc) = shortcut {
+    if let Some(sc) = shortcut
+        && h > 0.01
+    {
         ui.painter().text(
-            pos2(rect.max.x - 8.0, rect.center().y),
+            pos2(rect.max.x - 10.0, rect.center().y),
             Align2::RIGHT_CENTER,
             sc,
             FontId::proportional(11.5),
-            t::TEXT_3,
+            t::TEXT_3.gamma_multiply(h),
         );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Uppercase-free section label with an optional count badge.
+/// The primary "new" row at the top of the sidebar: accent icon tile + label.
+pub fn new_row(ui: &mut Ui, label: &str, shortcut: Option<&str>) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    let h = hover_t(ui, &resp);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(8),
+        mix(Color32::TRANSPARENT, t::HOVER, h),
+    );
+    let tile = Rect::from_center_size(pos2(rect.min.x + 18.0, rect.center().y), vec2(22.0, 22.0));
+    ui.painter().rect_filled(
+        tile,
+        CornerRadius::same(6),
+        mix(t::ACCENT, t::ACCENT_HOVER, h),
+    );
+    paint_icon(ui, tile.shrink(5.0), Icon::Plus, Color32::WHITE);
+    ui.painter().text(
+        pos2(rect.min.x + 37.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.0),
+        t::TEXT,
+    );
+    if let Some(sc) = shortcut
+        && h > 0.01
+    {
+        ui.painter().text(
+            pos2(rect.max.x - 10.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            sc,
+            FontId::proportional(11.5),
+            t::TEXT_3.gamma_multiply(h),
+        );
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Small section label with an optional count.
 pub fn section_header(ui: &mut Ui, title: &str, count: Option<usize>, badge_color: Color32) {
-    ui.add_space(6.0);
+    ui.add_space(12.0);
     ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new(title).size(11.5).color(t::TEXT_3));
+        ui.add_space(10.0);
+        ui.label(
+            egui::RichText::new(title)
+                .size(11.5)
+                .strong()
+                .color(t::TEXT_3),
+        );
         if let Some(n) = count.filter(|n| *n > 0) {
-            pill(ui, &n.to_string(), badge_color);
+            ui.label(
+                egui::RichText::new(n.to_string())
+                    .size(11.5)
+                    .color(badge_color),
+            );
         }
     });
     ui.add_space(2.0);
@@ -307,12 +339,12 @@ pub fn section_header(ui: &mut Ui, title: &str, count: Option<usize>, badge_colo
 pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
     let font = FontId::proportional(11.0);
     let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, color));
-    let size = vec2(galley.size().x + 12.0, 18.0);
+    let size = vec2(galley.size().x + 14.0, 18.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(9), color.gamma_multiply(0.16));
+        .rect_filled(rect, CornerRadius::same(9), color.gamma_multiply(0.14));
     ui.painter().galley(
-        pos2(rect.min.x + 6.0, rect.center().y - galley.size().y / 2.0),
+        pos2(rect.min.x + 7.0, rect.center().y - galley.size().y / 2.0),
         galley,
         color,
     );
@@ -325,9 +357,9 @@ pub fn state_pill(ui: &mut Ui, label: &str, color: Color32) -> Response {
     let galley = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font, color));
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 26.0, 22.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(11), color.gamma_multiply(0.14));
+        .rect_filled(rect, CornerRadius::same(11), color.gamma_multiply(0.12));
     ui.painter()
-        .circle_filled(pos2(rect.min.x + 11.0, rect.center().y), 3.5, color);
+        .circle_filled(pos2(rect.min.x + 11.0, rect.center().y), 3.0, color);
     ui.painter().galley(
         pos2(rect.min.x + 19.0, rect.center().y - galley.size().y / 2.0),
         galley,
@@ -343,7 +375,7 @@ pub fn kbd(ui: &mut Ui, text: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 10.0, 18.0), Sense::hover());
     ui.painter().rect(
         rect,
-        CornerRadius::same(4),
+        CornerRadius::same(5),
         t::BG_ELEVATED_2,
         Stroke::new(1.0, t::BORDER),
         egui::StrokeKind::Inside,
@@ -367,6 +399,217 @@ pub fn meter(ui: &mut Ui, frac: f32, color: Color32, width: f32) -> Response {
     resp
 }
 
+/// macOS-style switch with an eased knob.
+pub fn toggle_switch(ui: &mut Ui, on: &mut bool) -> Response {
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(36.0, 20.0), Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let k = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("knob"), *on, 0.16);
+    let h = hover_t(ui, &resp);
+    let off = mix(t::BORDER_STRONG, Color32::from_rgb(0x4a, 0x4b, 0x54), h);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(10), mix(off, t::ACCENT, k));
+    let x = egui::lerp((rect.min.x + 10.0)..=(rect.max.x - 10.0), k);
+    ui.painter().circle_filled(
+        pos2(x, rect.center().y + 0.6),
+        8.2,
+        Color32::from_black_alpha(60),
+    );
+    ui.painter()
+        .circle_filled(pos2(x, rect.center().y), 8.0, Color32::WHITE);
+    let value = *on;
+    let enabled = ui.is_enabled();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, value, ""));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A rounded group of settings rows (System Settings style).
+pub fn settings_group(ui: &mut Ui, title: Option<&str>, add: impl FnOnce(&mut Ui)) {
+    if let Some(title) = title {
+        ui.label(
+            egui::RichText::new(title)
+                .size(12.0)
+                .strong()
+                .color(t::TEXT_2),
+        );
+        ui.add_space(6.0);
+    }
+    egui::Frame::new()
+        .fill(t::BG_ELEVATED)
+        .stroke(Stroke::new(1.0, t::BORDER))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(egui::Margin::symmetric(14, 0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(ui);
+        });
+    ui.add_space(18.0);
+}
+
+/// One settings row: label (+ optional detail) on the left, control on the
+/// right. Rows after the first draw a hairline separator above themselves.
+pub fn setting_row<R>(
+    ui: &mut Ui,
+    first: bool,
+    label: &str,
+    detail: &str,
+    control: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    if !first {
+        let y = ui.cursor().min.y;
+        let r = ui.max_rect();
+        ui.painter().line_segment(
+            [pos2(r.min.x, y), pos2(r.max.x, y)],
+            Stroke::new(1.0, t::BORDER),
+        );
+    }
+    let h = if detail.is_empty() { 42.0 } else { 54.0 };
+    let w = ui.available_width();
+    ui.allocate_ui_with_layout(
+        vec2(w, h),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_size(vec2(w, h));
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                // Centre the text block: 17 pt label, 2 gap, 15 pt detail.
+                let block = if detail.is_empty() { 17.0 } else { 34.0 };
+                ui.add_space(((h - block) / 2.0).max(0.0));
+                ui.label(egui::RichText::new(label).size(13.0).color(t::TEXT));
+                if !detail.is_empty() {
+                    ui.label(egui::RichText::new(detail).size(11.5).color(t::TEXT_3));
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control)
+                .inner
+        },
+    )
+    .inner
+}
+
+/// Sidebar navigation item for sheets (Settings categories).
+pub fn nav_item(ui: &mut Ui, icon: Icon, label: &str, active: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    let h = hover_t(ui, &resp);
+    let bg = if active {
+        t::ACTIVE
+    } else {
+        mix(Color32::TRANSPARENT, t::HOVER, h)
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(7), bg);
+    let fg = if active {
+        t::TEXT
+    } else {
+        mix(t::TEXT_1, t::TEXT, h)
+    };
+    let ic = if active {
+        t::ACCENT_HOVER
+    } else {
+        mix(t::TEXT_2, t::TEXT, h)
+    };
+    paint_icon(
+        ui,
+        Rect::from_center_size(pos2(rect.min.x + 17.0, rect.center().y), vec2(15.0, 15.0)),
+        icon,
+        ic,
+    );
+    ui.painter().text(
+        pos2(rect.min.x + 34.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.0),
+        fg,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Compact − value + stepper.
+pub fn stepper(
+    ui: &mut Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    unit: &str,
+) -> bool {
+    let (rect, _) = ui.allocate_exact_size(vec2(112.0, 28.0), Sense::hover());
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(7),
+        t::BG_ELEVATED_2,
+        Stroke::new(1.0, t::BORDER),
+        egui::StrokeKind::Inside,
+    );
+    let mut changed = false;
+    for (i, (glyph, delta)) in [("−", -1.0f32), ("+", 1.0)].into_iter().enumerate() {
+        let r = if i == 0 {
+            Rect::from_min_size(rect.min, vec2(30.0, rect.height()))
+        } else {
+            Rect::from_min_size(
+                pos2(rect.max.x - 30.0, rect.min.y),
+                vec2(30.0, rect.height()),
+            )
+        };
+        let resp = ui.interact(r, ui.id().with(("stepper", i)), Sense::click());
+        let h = hover_t(ui, &resp);
+        ui.painter().rect_filled(
+            r.shrink(2.0),
+            CornerRadius::same(5),
+            mix(Color32::TRANSPARENT, t::HOVER, h),
+        );
+        ui.painter().text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            glyph,
+            FontId::proportional(15.0),
+            mix(t::TEXT_2, t::TEXT, h),
+        );
+        if resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            *value = (*value + delta).clamp(*range.start(), *range.end());
+            changed = true;
+        }
+    }
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        format!("{}{unit}", *value as i32),
+        FontId::proportional(12.5),
+        t::TEXT,
+    );
+    changed
+}
+
+/// Round send button (arrow up), accent when enabled.
+pub fn send_button(ui: &mut Ui, enabled: bool) -> Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), sense);
+    let h = hover_t(ui, &resp);
+    let fill = if enabled {
+        mix(t::ACCENT, t::ACCENT_HOVER, h)
+    } else {
+        t::BG_ELEVATED_2
+    };
+    ui.painter().circle_filled(rect.center(), 14.0, fill);
+    let fg = if enabled { Color32::WHITE } else { t::TEXT_3 };
+    paint_icon(ui, rect.shrink(7.5), Icon::Send, fg);
+    let resp = resp.on_hover_text("Send (Enter)");
+    if enabled {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
+    }
+}
+
 pub struct RowSpec<'a> {
     pub title: &'a str,
     pub subtitle: &'a str,
@@ -380,47 +623,68 @@ pub struct RowSpec<'a> {
 
 /// Two-line list row; the whole rect is the click target.
 pub fn row(ui: &mut Ui, spec: RowSpec<'_>) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+    let h = hover_t(ui, &resp);
     let painter = ui.painter_at(rect);
     let bg = if spec.active {
         t::ACTIVE
-    } else if resp.hovered() {
-        t::HOVER
     } else {
-        Color32::TRANSPARENT
+        mix(Color32::TRANSPARENT, t::HOVER, h)
     };
     painter.rect_filled(rect, CornerRadius::same(8), bg);
     if let Some(a) = spec.accent {
         painter.rect_filled(
             Rect::from_min_size(
-                pos2(rect.min.x, rect.min.y + 8.0),
-                vec2(3.0, rect.height() - 16.0),
+                pos2(rect.min.x, rect.min.y + 11.0),
+                vec2(3.0, rect.height() - 22.0),
             ),
             CornerRadius::same(2),
             a,
         );
     }
-    let left = rect.min.x + 14.0;
+    let left = rect.min.x + 10.0;
+    let icon_c = pos2(left + 12.0, rect.center().y);
     match spec.icon {
         Some(i) => {
-            let r = Rect::from_center_size(pos2(left + 6.0, rect.min.y + 15.0), vec2(14.0, 14.0));
-            paint_icon(ui, r, i, if spec.active { t::TEXT } else { t::TEXT_2 });
-            painter.circle_filled(pos2(left + 12.0, rect.min.y + 21.0), 3.6, bg_or(bg));
-            painter.circle_filled(pos2(left + 12.0, rect.min.y + 21.0), 2.6, spec.dot);
+            let tile = Rect::from_center_size(icon_c, vec2(26.0, 26.0));
+            painter.rect_filled(
+                tile,
+                CornerRadius::same(7),
+                if spec.active {
+                    t::BG_ELEVATED_2
+                } else {
+                    t::BG_ELEVATED
+                },
+            );
+            paint_icon(
+                ui,
+                tile.shrink(6.5),
+                i,
+                if spec.active { t::TEXT } else { t::TEXT_2 },
+            );
+            // Status dot, cut out of the tile corner.
+            let dot = tile.right_bottom() + vec2(-1.5, -1.5);
+            let under = if spec.active {
+                t::ACTIVE
+            } else {
+                mix(t::BG_SIDEBAR, t::HOVER, h)
+            };
+            painter.circle_filled(dot, 4.8, under);
+            painter.circle_filled(dot, 3.2, spec.dot);
         }
         None => {
-            painter.circle_filled(pos2(left + 6.0, rect.min.y + 15.0), 4.0, spec.dot);
+            painter.circle_filled(icon_c, 4.0, spec.dot);
         }
     }
-    let text_x = left + 22.0;
+    let text_x = left + 32.0;
     let trailing_w = spec
         .trailing
-        .map(|s| s.len() as f32 * 6.5 + 12.0)
+        .map(|s| text_w(ui, s, FontId::proportional(11.0)) + 10.0)
         .unwrap_or(0.0);
     let max_w = (rect.max.x - text_x - 10.0 - trailing_w).max(20.0);
     let title_col = if spec.active { t::TEXT } else { t::TEXT_1 };
     let title = elide(ui, spec.title, FontId::proportional(13.0), title_col, max_w);
-    painter.galley(pos2(text_x, rect.min.y + 6.0), title, title_col);
+    painter.galley(pos2(text_x, rect.min.y + 7.0), title, title_col);
     let sub = elide(
         ui,
         spec.subtitle,
@@ -428,10 +692,10 @@ pub fn row(ui: &mut Ui, spec: RowSpec<'_>) -> Response {
         t::TEXT_3,
         max_w + trailing_w,
     );
-    painter.galley(pos2(text_x, rect.min.y + 24.0), sub, t::TEXT_3);
+    painter.galley(pos2(text_x, rect.min.y + 25.0), sub, t::TEXT_3);
     if let Some(tr) = spec.trailing {
         painter.text(
-            pos2(rect.max.x - 10.0, rect.min.y + 14.0),
+            pos2(rect.max.x - 10.0, rect.min.y + 15.0),
             Align2::RIGHT_CENTER,
             tr,
             FontId::proportional(11.0),
@@ -439,15 +703,6 @@ pub fn row(ui: &mut Ui, spec: RowSpec<'_>) -> Response {
         );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// Ring color that "cuts out" the status dot from the row background.
-fn bg_or(bg: Color32) -> Color32 {
-    if bg == Color32::TRANSPARENT {
-        t::BG_SIDEBAR
-    } else {
-        bg
-    }
 }
 
 /// Single-line galley truncated with an ellipsis.
@@ -472,14 +727,14 @@ pub fn elide(
 pub fn floating_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(t::BG_ELEVATED)
-        .stroke(Stroke::new(1.0, t::BORDER))
-        .corner_radius(CornerRadius::same(12))
+        .stroke(Stroke::new(1.0, t::BORDER_STRONG))
+        .corner_radius(CornerRadius::same(14))
         .inner_margin(egui::Margin::same(12))
         .shadow(egui::Shadow {
-            offset: [0, 12],
-            blur: 40,
+            offset: [0, 18],
+            blur: 48,
             spread: 0,
-            color: Color32::from_black_alpha(150),
+            color: Color32::from_black_alpha(160),
         })
 }
 
