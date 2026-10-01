@@ -22,11 +22,11 @@ pub fn send(
             n.hint(notify_rust::Hint::Category("im.received".into()));
             if let Ok(handle) = n.show() {
                 handle.wait_for_action(|action| {
-                    if action == "default" {
-                        if let Some(p) = pane {
-                            let _ = tx.send(AppEvent::FocusSession(p));
-                            ctx.request_repaint();
-                        }
+                    if action == "default"
+                        && let Some(p) = pane
+                    {
+                        let _ = tx.send(AppEvent::FocusSession(p));
+                        ctx.request_repaint();
                     }
                 });
             }
