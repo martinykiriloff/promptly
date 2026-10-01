@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Promptly: the terminal built for Claude Code</title>
+<meta name="description" content="Run several Claude Code sessions side by side and know the moment one needs you. Live plan usage, worktrees per session, and review without leaving the terminal. macOS and Linux.">
+<meta property="og:title" content="Promptly: the terminal built for Claude Code">
+<meta property="og:description" content="Five Claude sessions. One of them needs you. Promptly tells you which.">
+<meta property="og:image" content="https://martinykiriloff.github.io/promptly/assets/main.png">
+<meta name="theme-color" content="#E6E9EE">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #E6E9EE;
+  --paper-2: #DCE0E6;
+  --ink: #13161C;
+  --ink-2: #3D434E;
+  --ink-3: #6A717D;
+  --rule: #C6CCD5;
+  /* The app's own surfaces, used for the window replicas */
+  --win: #131417;
+  --win-side: #191A1E;
+  --win-raise: #222328;
+  --win-line: #2A2B31;
+  --win-text: #F2F2F4;
+  --win-text-2: #A3A6AD;
+  --win-text-3: #74777F;
+  /* State colors: the only color on the page that carries meaning */
+  --amber: #E0A52E;
+  --blue: #4C8DF6;
+  --green: #3FB950;
+  --red: #E5534B;
+  /* Ember: logo and the one primary action */
+  --ember: #E8643C;
+  --ember-deep: #C9502E;
+
+  --display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --wrap: 1180px;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--display);
+  font-size: 18px;
+  line-height: 1.55;
+  font-variation-settings: "wdth" 96;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 6px; }
+img { max-width: 100%; height: auto; display: block; }
+.wrap { max-width: var(--wrap); margin: 0 auto; padding: 0 28px; }
+
+/* ---------- Top bar ---------- */
+.top { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
+.brand { display: flex; align-items: center; gap: 12px; text-decoration: none; font-weight: 700; font-size: 20px; letter-spacing: -0.01em; }
+.brand img { width: 34px; height: 34px; }
+.top nav { display: flex; gap: 22px; align-items: center; font-size: 16px; }
+.top nav a { text-decoration: none; color: var(--ink-2); }
+.top nav a:hover { color: var(--ink); }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 10px;
+  font: 600 16px/1 var(--display);
+  padding: 14px 20px; border-radius: 10px; text-decoration: none; border: 0; cursor: pointer;
+}
+.btn-primary { background: var(--ember); color: #fff; box-shadow: 0 1px 0 rgba(255,255,255,.25) inset, 0 6px 18px -8px rgba(201,80,46,.8); }
+.btn-primary:hover { background: var(--ember-deep); }
+.btn-quiet { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--rule); }
+.btn-quiet:hover { box-shadow: inset 0 0 0 1.5px var(--ink-3); }
+.btn small { font-weight: 500; opacity: .8; font-size: 13px; }
+
+/* ---------- Hero ---------- */
+.hero { padding: 48px 0 28px; }
+.hero h1 {
+  font-size: clamp(44px, 7.4vw, 104px);
+  line-height: .95;
+  letter-spacing: -0.035em;
+  font-weight: 750;
+  font-variation-settings: "wdth" 78, "opsz" 96;
+  margin: 0 0 26px;
+  max-width: 11.5ch;
+}
+.hero h1 .quiet { color: var(--ink-3); }
+.lede { font-size: 21px; color: var(--ink-2); max-width: 36em; margin: 0 0 30px; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.cta .meta { color: var(--ink-3); font-size: 15px; margin-left: 6px; }
+
+/* ---------- Live replica ---------- */
+.stage { margin: 56px 0 0; position: relative; }
+.window {
+  background: var(--win); color: var(--win-text);
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 0 0 1px #0b0c0e, 0 40px 80px -30px rgba(19,22,28,.55), 0 18px 30px -18px rgba(19,22,28,.4);
+  display: grid; grid-template-columns: 250px minmax(0, 1fr); min-height: 520px;
+  font-size: 13px;
+}
+.window > *, .row > span { min-width: 0; }
+.w-side { background: var(--win-side); border-right: 1px solid var(--win-line); padding: 12px 10px; display: flex; flex-direction: column; gap: 4px; }
+.lights { display: flex; gap: 8px; padding: 2px 4px 14px; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; background: #3a3b41; }
+.lights i:nth-child(1) { background: #ED6A5E; } .lights i:nth-child(2) { background: #F4BF4F; } .lights i:nth-child(3) { background: #61C554; }
+.w-new { background: var(--ember); color: #fff; border-radius: 7px; padding: 8px 12px; font-weight: 600; display: flex; justify-content: space-between; }
+.w-new span:last-child { opacity: .7; font-weight: 500; }
+.w-h { color: var(--win-text-3); font-size: 11.5px; padding: 12px 8px 4px; display: flex; gap: 8px; align-items: center; }
+.badge { background: rgba(224,165,46,.18); color: var(--amber); border-radius: 9px; padding: 1px 7px; font-size: 11px; }
+.row { display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: start; padding: 7px 8px; border-radius: 8px; position: relative; }
+.row.active { background: var(--win-raise); }
+.row .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; background: var(--win-text-3); transition: background .4s; }
+.row b { display: block; font-weight: 500; color: var(--win-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row em { display: block; font-style: normal; color: var(--win-text-3); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .cost { color: var(--win-text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.row.attn::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--amber); }
+.s-working .dot { background: var(--blue); }
+.s-waiting .dot { background: var(--amber); }
+.s-done .dot { background: var(--green); }
+.s-ready .dot { background: var(--win-text-3); }
+#queue { display: flex; flex-direction: column; gap: 2px; }
+#queue:empty + .none { display: block; }
+
+.usage { margin-top: auto; background: var(--win-raise); border: 1px solid var(--win-line); border-radius: 10px; padding: 12px; }
+.usage .u-t { display: flex; justify-content: space-between; color: var(--win-text); font-weight: 500; margin-bottom: 8px; }
+.live { color: var(--win-text-3); font-size: 11px; display: inline-flex; gap: 6px; align-items: center; font-weight: 400; }
+.live i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.lim { margin: 8px 0; }
+.lim div:first-child { display: flex; justify-content: space-between; font-size: 12px; color: var(--win-text-2); }
+.lim strong { color: var(--win-text); font-weight: 500; margin-left: 6px; font-variant-numeric: tabular-nums; }
+.bar { height: 5px; border-radius: 3px; background: var(--win-line); margin-top: 6px; overflow: hidden; }
+.bar span { display: block; height: 100%; border-radius: 3px; background: var(--win-text-2); transition: width 1.2s cubic-bezier(.2,.7,.2,1), background .4s; }
+.spend { display: flex; justify-content: space-between; align-items: baseline; margin-top: 10px; }
+.spend strong { font-size: 17px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.spend span { color: var(--win-text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.w-main { display: flex; flex-direction: column; min-width: 0; }
+.w-head { height: 44px; border-bottom: 1px solid var(--win-line); display: flex; align-items: center; gap: 12px; padding: 0 14px; }
+.pill { border-radius: 11px; padding: 3px 10px 3px 20px; font-size: 12px; position: relative; transition: background .4s, color .4s; }
+.pill::before { content: ""; position: absolute; left: 8px; top: 50%; width: 7px; height: 7px; border-radius: 50%; background: currentColor; transform: translateY(-50%); }
+.p-working { background: rgba(76,141,246,.15); color: var(--blue); }
+.p-waiting { background: rgba(224,165,46,.15); color: var(--amber); }
+.p-done { background: rgba(63,185,80,.15); color: var(--green); }
+.w-head .t { font-weight: 500; }
+.w-head .br { color: var(--win-text-2); font-size: 12.5px; }
+.w-head .m { margin-left: auto; display: flex; gap: 14px; color: var(--win-text-2); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.term { font-family: var(--mono); font-size: 12.5px; line-height: 1.65; padding: 14px 16px; color: var(--win-text-2); white-space: pre-wrap; flex: 1; overflow: hidden; }
+.term .u { color: var(--win-text); }
+.term .dim { color: var(--win-text-3); }
+.term .ok { color: var(--green); }
+.term .ac { color: #E8835F; }
+.term .warn { color: var(--amber); }
+.caret { display: inline-block; width: .6em; height: 1.1em; vertical-align: -0.2em; background: var(--win-text-2); animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+.toast {
+  position: absolute; right: 18px; top: 18px; width: 330px;
+  background: rgba(40,41,46,.94); color: var(--win-text); border-radius: 14px; padding: 12px 14px;
+  display: grid; grid-template-columns: 32px 1fr; gap: 10px; align-items: center;
+  box-shadow: 0 18px 40px -10px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.06);
+  transform: translateY(-14px); opacity: 0; transition: transform .5s cubic-bezier(.2,.8,.2,1), opacity .4s;
+  font-size: 13px; pointer-events: none;
+}
+.toast.on { transform: none; opacity: 1; }
+.toast img { width: 32px; height: 32px; }
+.toast b { display: block; font-weight: 600; }
+.toast span { color: var(--win-text-2); }
+.stage-note { color: var(--ink-3); font-size: 15px; margin: 14px 2px 0; }
+
+/* ---------- Sections ---------- */
+section { padding: 110px 0 0; }
+h2 {
+  font-size: clamp(34px, 4.6vw, 58px); line-height: 1; letter-spacing: -0.03em; font-weight: 700;
+  font-variation-settings: "wdth" 82, "opsz" 72; margin: 0 0 22px; max-width: 16ch;
+}
+h3 { font-size: 24px; line-height: 1.2; letter-spacing: -0.015em; font-weight: 650; margin: 0 0 10px; }
+.intro { font-size: 20px; color: var(--ink-2); max-width: 34em; margin: 0; }
+
+.steps { list-style: none; padding: 0; margin: 46px 0 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; border-top: 1.5px solid var(--ink); }
+.steps li { padding: 22px 28px 0 0; counter-increment: s; }
+.steps li::before { content: counter(s); display: block; font-weight: 700; font-size: 44px; line-height: 1; margin-bottom: 14px; font-variation-settings: "wdth" 75; color: var(--ink-3); }
+.steps p { color: var(--ink-2); margin: 0; font-size: 17px; }
+.steps code { font-family: var(--mono); font-size: .86em; background: var(--paper-2); padding: 1px 5px; border-radius: 4px; }
+
+.feature { display: grid; grid-template-columns: 5fr 7fr; gap: 64px; align-items: center; margin-top: 90px; }
+.feature.flip { grid-template-columns: 7fr 5fr; }
+.feature.flip .copy { order: 2; }
+.feature .copy p { color: var(--ink-2); margin: 0 0 14px; }
+.feature ul { padding: 0; margin: 18px 0 0; list-style: none; }
+.feature li { padding: 9px 0; border-top: 1px solid var(--rule); color: var(--ink-2); font-size: 16.5px; }
+.feature li strong { color: var(--ink); font-weight: 600; }
+.shot { border-radius: 12px; overflow: hidden; box-shadow: 0 0 0 1px #0b0c0e, 0 30px 60px -28px rgba(19,22,28,.6); background: var(--win); }
+
+.facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 28px; margin-top: 50px; }
+.facts div { border-top: 1.5px solid var(--ink); padding-top: 14px; }
+.facts strong { display: block; font-size: 30px; letter-spacing: -0.02em; font-weight: 700; line-height: 1.1; font-variation-settings: "wdth" 80; }
+.facts span { color: var(--ink-2); font-size: 15.5px; }
+
+/* ---------- Install ---------- */
+.install { display: grid; grid-template-columns: 5fr 7fr; gap: 64px; margin-top: 10px; align-items: start; }
+.tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.tabs button { font: 600 15px var(--display); border: 0; background: transparent; color: var(--ink-2); padding: 9px 14px; border-radius: 8px; cursor: pointer; }
+.tabs button[aria-selected="true"] { background: var(--ink); color: var(--paper); }
+.code { background: var(--win); color: var(--win-text); border-radius: 12px; padding: 18px 20px; font-family: var(--mono); font-size: 13.5px; line-height: 1.75; position: relative; overflow-x: auto; }
+.code .c { color: var(--win-text-3); }
+.code .p { color: #E8835F; user-select: none; }
+.copy-btn { position: absolute; top: 12px; right: 12px; font: 500 12.5px var(--display); background: var(--win-raise); color: var(--win-text-2); border: 1px solid var(--win-line); border-radius: 7px; padding: 6px 10px; cursor: pointer; }
+.copy-btn:hover { color: var(--win-text); }
+[role="tabpanel"][hidden] { display: none; }
+.note { color: var(--ink-3); font-size: 15px; margin-top: 12px; }
+
+footer { margin-top: 120px; padding: 34px 0 46px; border-top: 1.5px solid var(--ink); display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; color: var(--ink-3); font-size: 15px; }
+footer a { color: var(--ink-2); }
+
+/* ---------- Responsive ---------- */
+@media (max-width: 960px) {
+  .feature, .feature.flip, .install { grid-template-columns: 1fr; gap: 28px; }
+  .feature.flip .copy { order: 0; }
+  .facts { grid-template-columns: repeat(2, 1fr); }
+  .window { grid-template-columns: 210px 1fr; }
+}
+@media (max-width: 720px) {
+  body { font-size: 17px; }
+  .wrap { padding: 0 18px; }
+  .top nav a:not(.btn) { display: none; }
+  .window { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .cta .meta { margin-left: 0; flex-basis: 100%; }
+  .hero h1 { font-size: 46px; }
+  .w-main { display: none; }
+  .toast { right: 10px; left: 10px; width: auto; top: 10px; }
+  .steps { grid-template-columns: 1fr; }
+  .steps li { padding-right: 0; padding-bottom: 18px; }
+  .facts { grid-template-columns: 1fr 1fr; gap: 20px; }
+  section { padding-top: 80px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#"><img src="assets/icon.png" alt="" width="34" height="34">Promptly</a>
+    <nav aria-label="Primary">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="https://github.com/martinykiriloff/promptly">GitHub</a>
+      <a class="btn btn-primary" href="#install" style="padding:10px 16px">Download</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="hero">
+      <h1>Five Claude sessions. <span class="quiet">One of them needs you.</span></h1>
+      <p class="lede">Promptly is a terminal built for Claude Code. It runs the real <code style="font-family:var(--mono);font-size:.85em">claude</code> CLI, watches every session, and pulls you in the moment one is waiting on a permission, a question or a review. Your plan usage stays live in the corner.</p>
+      <div class="cta">
+        <a class="btn btn-primary" id="dl-mac" href="https://github.com/martinykiriloff/promptly/releases/latest">Download for macOS <small id="dl-ver">Apple silicon</small></a>
+        <a class="btn btn-quiet" href="#install">Linux and source</a>
+        <span class="meta">macOS 14+ and Linux. Updates itself.</span>
+      </div>
+
+      <div class="stage" aria-label="Animated preview of Promptly with several Claude sessions">
+        <div class="window" id="demo">
+          <aside class="w-side">
+            <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+            <div class="w-new"><span>New Claude session</span><span>⌘N</span></div>
+            <div class="w-h">Needs you <span class="badge" id="qcount" hidden>1</span></div>
+            <div id="queue"></div>
+            <div class="w-h">Sessions</div>
+            <div id="sessions"></div>
+            <div class="usage" aria-label="Plan usage">
+              <div class="u-t">Usage <span class="live"><i></i>live</span></div>
+              <div class="lim"><div>5-hour <strong id="u5">38%</strong><span id="r5">resets 2h 14m</span></div><div class="bar"><span id="b5" style="width:38%"></span></div></div>
+              <div class="lim"><div>Weekly <strong id="u7">22%</strong><span>resets 3d 18h</span></div><div class="bar"><span id="b7" style="width:22%"></span></div></div>
+              <div class="spend"><strong id="spend">$4.18</strong><span id="burn">$3.40/h</span></div>
+            </div>
+          </aside>
+          <div class="w-main">
+            <div class="w-head">
+              <span class="pill p-working" id="hpill">Working</span>
+              <span class="t">Rate limiting for the API</span>
+              <span class="br">⎇ promptly/rate-limits</span>
+              <span class="m"><span id="hel">1m 12s</span><span>ctx 31%</span><span id="hcost">$1.27</span></span>
+            </div>
+<div class="term" id="term"><span class="dim">❯</span> <span class="u">Add rate limiting to the public API and cover it with tests</span>
+
+<span class="ac">⏺</span> I'll add a token-bucket limiter as middleware.
+  <span class="dim">⎿</span> Read src/server.ts
+  <span class="dim">⎿</span> Edit src/middleware/rate-limit.ts <span class="ok">+48</span>
+  <span class="dim">⎿</span> Edit src/server.ts <span class="ok">+3</span> <span style="color:var(--red)">-1</span>
+<span class="ac">⏺</span> Bash(npm test -- rate-limit)
+  <span class="dim">⎿</span> <span class="ok">✓ 12 passed</span>
+<span id="term-tail"><span class="ac">✻</span> <span class="dim">Thinking…</span> <span class="caret"></span></span></div>
+          </div>
+        </div>
+        <div class="toast" id="toast" role="status" aria-live="polite"><img src="assets/icon.png" alt=""><div><b>Docs site</b><span>Needs permission: Bash: npm publish</span></div></div>
+      </div>
+      <p class="stage-note">A recreation of the real app. Sessions here are scripted; in Promptly they're your Claude Code sessions.</p>
+    </div>
+
+    <section id="how">
+      <h2>It wraps Claude Code instead of replacing it</h2>
+      <p class="intro">Nothing is forked or patched, so every Claude Code release works on day one. Promptly listens on the side and turns what Claude does into something you can act on.</p>
+      <ol class="steps">
+        <li><h3>Start a session</h3><p>Press ⌘N. The unmodified <code>claude</code> TUI runs through your login shell, in its own git worktree if you want one.</p></li>
+        <li><h3>Promptly listens</h3><p>Session-scoped hooks, the status line feed and the transcript tell it when Claude is working, waiting, finished, or spending.</p></li>
+        <li><h3>You get pulled in</h3><p>The session turns amber, joins the Needs you queue and sends a notification. ⌘J takes you straight there. Approving is still yours.</p></li>
+      </ol>
+    </section>
+
+    <section id="features">
+      <h2>Built for running agents in parallel</h2>
+
+      <div class="feature">
+        <div class="copy">
+          <h3>See your plan usage as it moves</h3>
+          <p>Claude Code reports your 5-hour and weekly limits to its status line. Promptly turns them into meters that sit in the sidebar and count down to the reset.</p>
+          <ul>
+            <li><strong>Limit alerts</strong> when either window passes 80% and 95%</li>
+            <li><strong>Spend and burn rate</strong> across open sessions, per hour</li>
+            <li><strong>Today's tokens</strong> across every Claude session on the machine, by hour and model</li>
+          </ul>
+        </div>
+        <div class="shot"><img src="assets/usage.png" alt="Usage dashboard showing 5-hour and weekly limits, spend, tokens by hour and a per-session table" loading="lazy" width="1800" height="1125"></div>
+      </div>
+
+      <div class="feature flip">
+        <div class="copy">
+          <h3>Review without leaving the terminal</h3>
+          <p>The diff pane follows the session you're looking at and refreshes when Claude edits a file. Click a line to comment, then send every comment back to the session as one prompt.</p>
+          <ul>
+            <li><strong>Unified or split</strong> diffs, untracked files included</li>
+            <li><strong>Worktree per session</strong>, so parallel agents never collide</li>
+            <li><strong>Fan out</strong> a task list into one session per task</li>
+          </ul>
+        </div>
+        <div class="shot"><img src="assets/main.png" alt="Promptly main window with a Claude session and the review pane showing a diff" loading="lazy" width="1800" height="1125"></div>
+      </div>
+
+      <div class="feature">
+        <div class="copy">
+          <h3>Everything is one keystroke away</h3>
+          <p>Every action lives in the command palette and every shortcut can be rebound. Search past conversations across all your projects and reopen one with its full history.</p>
+          <ul>
+            <li><strong>Composer</strong> for long prompts, with @file completion</li>
+            <li><strong>Resume</strong> any past session by text or folder</li>
+            <li><strong>promptly-ctl</strong> to script sessions from Makefiles and git hooks</li>
+          </ul>
+        </div>
+        <div class="shot"><img src="assets/palette.png" alt="Command palette listing actions with their shortcuts" loading="lazy" width="1800" height="1125"></div>
+      </div>
+
+      <div class="facts">
+        <div><strong>5.6 ms</strong><span>p95 hook round trip, against a 20 ms budget</span></div>
+        <div><strong>0</strong><span>changes to your ~/.claude settings</span></div>
+        <div><strong>GPU</strong><span>rendered terminal with Kitty keyboard and truecolor</span></div>
+        <div><strong>Local</strong><span>no account, no telemetry, sockets only</span></div>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>Install</h2>
+      <div class="install">
+        <div>
+          <p class="intro">Promptly needs Claude Code on your PATH. After the first install it updates itself from GitHub Releases and checks every download against a published checksum.</p>
+          <p class="note">macOS builds aren't notarized yet. Clear the quarantine flag once after unzipping, as shown.</p>
+        </div>
+        <div>
+          <div class="tabs" role="tablist" aria-label="Platform">
+            <button role="tab" aria-selected="true" aria-controls="t-mac" id="tab-mac">macOS</button>
+            <button role="tab" aria-selected="false" aria-controls="t-linux" id="tab-linux" tabindex="-1">Linux</button>
+            <button role="tab" aria-selected="false" aria-controls="t-src" id="tab-src" tabindex="-1">From source</button>
+          </div>
+          <div role="tabpanel" id="t-mac" aria-labelledby="tab-mac">
+<pre class="code"><button class="copy-btn" type="button">Copy</button><span class="c"># Download the latest build, then:</span>
+<span class="p">$ </span>unzip Promptly-*-macos-arm64.zip -d /Applications
+<span class="p">$ </span>xattr -dr com.apple.quarantine /Applications/Promptly.app
+<span class="p">$ </span>open /Applications/Promptly.app</pre>
+          </div>
+          <div role="tabpanel" id="t-linux" aria-labelledby="tab-linux" hidden>
+<pre class="code"><button class="copy-btn" type="button">Copy</button><span class="c"># Debian / Ubuntu (x86_64 or arm64)</span>
+<span class="p">$ </span>sudo apt install ./promptly_*_$(dpkg --print-architecture).deb
+
+<span class="c"># Any distro: unpack and run; updates itself in place</span>
+<span class="p">$ </span>tar -xzf promptly-*-linux-$(uname -m | sed s/aarch64/arm64/).tar.gz
+<span class="p">$ </span>./promptly</pre>
+          </div>
+          <div role="tabpanel" id="t-src" aria-labelledby="tab-src" hidden>
+<pre class="code"><button class="copy-btn" type="button">Copy</button><span class="p">$ </span>git clone https://github.com/martinykiriloff/promptly.git
+<span class="p">$ </span>cd promptly
+<span class="p">$ </span>cargo build --release --workspace
+<span class="p">$ </span>./target/release/promptly</pre>
+          </div>
+          <p class="note">All builds are on the <a href="https://github.com/martinykiriloff/promptly/releases/latest">releases page</a>, with <code style="font-family:var(--mono);font-size:.9em">SHA256SUMS</code>.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>Promptly is an independent project and is not affiliated with Anthropic. Claude and Claude Code are trademarks of Anthropic.</span>
+    <span><a href="https://github.com/martinykiriloff/promptly">Source on GitHub</a></span>
+  </footer>
+</div>
+
+<script>
+// ---------- Latest release: deep-link the download button ----------
+(async () => {
+  try {
+    const r = await fetch("https://api.github.com/repos/martinykiriloff/promptly/releases/latest");
+    if (!r.ok) return;
+    const rel = await r.json();
+    const mac = (rel.assets || []).find(a => /macos-arm64\.zip$/.test(a.name));
+    if (mac) document.getElementById("dl-mac").href = mac.browser_download_url;
+    document.getElementById("dl-ver").textContent = rel.tag_name + " · Apple silicon";
+  } catch (_) { /* offline or rate limited: the releases page link still works */ }
+})();
+
+// ---------- Tabs + copy ----------
+const tabs = [...document.querySelectorAll('[role="tab"]')];
+function select(tab) {
+  tabs.forEach(t => {
+    const on = t === tab;
+    t.setAttribute("aria-selected", on);
+    t.tabIndex = on ? 0 : -1;
+    document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+  });
+  tab.focus();
+}
+tabs.forEach((t, i) => {
+  t.addEventListener("click", () => select(t));
+  t.addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") select(tabs[(i + 1) % tabs.length]);
+    if (e.key === "ArrowLeft") select(tabs[(i + tabs.length - 1) % tabs.length]);
+  });
+});
+document.querySelectorAll(".copy-btn").forEach(b => b.addEventListener("click", async () => {
+  const text = [...b.parentElement.childNodes].filter(n => n !== b).map(n => n.textContent).join("")
+    .split("\n").filter(l => l.trim() && !l.trim().startsWith("#")).map(l => l.replace(/^\$ /, "")).join("\n");
+  try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch (_) { b.textContent = "Select and copy"; }
+  setTimeout(() => (b.textContent = "Copy"), 1600);
+}));
+
+// ---------- Live replica: one scripted loop ----------
+const sessions = [
+  { id: "api", name: "Rate limiting for the API", place: "promptly/rate-limits", state: "working", cost: 1.27 },
+  { id: "docs", name: "Docs site", place: "promptly/docs-site", state: "working", cost: 0.84 },
+  { id: "parser", name: "Parser tests", place: "promptly/parser-tests", state: "done", cost: 0.66 },
+  { id: "auth", name: "Fix login redirect", place: "main", state: "ready", cost: 0.92 },
+  { id: "deps", name: "Upgrade dependencies", place: "promptly/deps", state: "working", cost: 0.49 },
+];
+const label = { working: "Working", waiting: "Needs approval", done: "Done", ready: "Ready" };
+const $ = id => document.getElementById(id);
+function render() {
+  const list = $("sessions"), queue = $("queue");
+  list.innerHTML = ""; queue.innerHTML = "";
+  sessions.forEach((s, i) => {
+    const row = document.createElement("div");
+    row.className = `row s-${s.state}` + (i === 0 ? " active" : "");
+    row.innerHTML = `<span class="dot"></span><span><b>${s.name}</b><em>${label[s.state]} · ${s.place}</em></span><span class="cost">$${s.cost.toFixed(2)}</span>`;
+    list.appendChild(row);
+    if (s.state === "waiting") {
+      const q = document.createElement("div");
+      q.className = "row attn s-waiting";
+      q.innerHTML = `<span class="dot"></span><span><b>${s.name}</b><em>Needs approval · Bash: npm publish</em></span><span class="cost" id="wait">0s</span>`;
+      queue.appendChild(q);
+    }
+  });
+  const n = sessions.filter(s => s.state === "waiting").length;
+  $("qcount").hidden = n === 0; $("qcount").textContent = n;
+}
+render();
+
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+let u5 = 38, u7 = 22, spend = 4.18, t = 0, waitSince = null, hcost = 1.27, hsec = 72;
+function setUsage() {
+  $("u5").textContent = Math.round(u5) + "%"; $("b5").style.width = u5 + "%";
+  $("b5").style.background = u5 >= 80 ? "var(--amber)" : "";
+  $("u7").textContent = Math.round(u7) + "%"; $("b7").style.width = u7 + "%";
+  $("spend").textContent = "$" + spend.toFixed(2);
+}
+const beats = [
+  // [tick, action]
+  [3, () => { sessions[1].state = "waiting"; render(); waitSince = t; $("toast").classList.add("on"); }],
+  [9, () => $("toast").classList.remove("on")],
+  [11, () => { $("hpill").className = "pill p-done"; $("hpill").textContent = "Done";
+               $("term-tail").innerHTML = '<span class="ac">⏺</span> Rate limiting is in place: 100 requests a minute per key, with tests.\n\n<span class="dim">❯</span> <span class="caret"></span>';
+               sessions[0].state = "done"; render(); }],
+  [17, () => { sessions[1].state = "working"; waitSince = null; render(); }],
+  [22, () => { sessions[0].state = "working"; $("hpill").className = "pill p-working"; $("hpill").textContent = "Working";
+               $("term-tail").innerHTML = '<span class="ac">✻</span> <span class="dim">Thinking…</span> <span class="caret"></span>'; render(); }],
+];
+if (!reduce) {
+  setInterval(() => {
+    t++;
+    const busy = sessions.filter(s => s.state === "working").length;
+    spend += busy * 0.011; u5 = Math.min(95, u5 + busy * 0.07); u7 = Math.min(90, u7 + busy * 0.012);
+    sessions.forEach(s => { if (s.state === "working") s.cost += 0.011; });
+    if (sessions[0].state === "working") { hcost += 0.011; hsec++; }
+    $("hcost").textContent = "$" + hcost.toFixed(2);
+    $("hel").textContent = `${Math.floor(hsec / 60)}m ${String(hsec % 60).padStart(2, "0")}s`;
+    $("burn").textContent = "$" + (busy * 0.011 * 3600 / 10).toFixed(2) + "/h";
+    setUsage();
+    for (const [at, fn] of beats) if (t % 26 === at) fn();
+    if (waitSince !== null && $("wait")) $("wait").textContent = (t - waitSince) + "s";
+    document.querySelectorAll("#sessions .cost").forEach((c, i) => c.textContent = "$" + sessions[i].cost.toFixed(2));
+  }, 1000);
+} else {
+  // Still state that tells the story: one session waiting.
+  sessions[1].state = "waiting"; render();
+}
+</script>
+</body>
+</html>

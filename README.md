@@ -9,7 +9,7 @@
 Run several Claude Code sessions side by side and know the moment one needs you.
 See your plan usage live. Review what changed without leaving the window.
 
-macOS (Apple silicon) · Linux (x86_64 / arm64, Wayland and X11) · [Latest release](https://github.com/martinykiriloff/promptly/releases/latest)
+**[promptly website](https://martinykiriloff.github.io/promptly/)** · [Latest release](https://github.com/martinykiriloff/promptly/releases/latest) · macOS (Apple silicon) and Linux
 
 ![Promptly main window: sessions on the left, Claude Code in the middle, review pane on the right](docs/screenshots/main.png)
 
