@@ -7,7 +7,7 @@
 Run several Claude Code sessions side by side and know the moment one needs you.
 See your plan usage live. Review what changed without leaving the window.
 
-macOS (Apple silicon) · Linux (x86_64 / arm64, Wayland and X11) · Release `v2026.1`
+macOS (Apple silicon) · Linux (x86_64 / arm64, Wayland and X11) · [Latest release](https://github.com/martinykiriloff/promptly/releases/latest)
 
 ![Promptly main window: sessions on the left, Claude Code in the middle, review pane on the right](docs/screenshots/main.png)
 
@@ -146,15 +146,46 @@ Grab the latest build from [Releases](https://github.com/martinykiriloff/promptl
 
 | Platform | File |
 |---|---|
-| macOS 14+ (Apple silicon) | `Promptly-v2026.1-macos-arm64.zip` |
-| Linux x86_64 / arm64 | `.deb` or `promptly-v2026.1-linux-<arch>.tar.gz` |
+| macOS 14+ (Apple silicon) | `Promptly-<version>-macos-arm64.zip` |
+| Linux x86_64 / arm64 | `.deb` or `promptly-<version>-linux-<arch>.tar.gz` |
 
-The macOS build in this release is **not yet signed or notarized**. After unzipping,
+macOS builds are **not yet signed or notarized**. After unzipping,
 clear the quarantine flag once:
 
 ```sh
 xattr -dr com.apple.quarantine Promptly.app
 ```
+
+### Updating
+
+Promptly updates itself from this repository's
+[Releases](https://github.com/martinykiriloff/promptly/releases):
+
+1. It checks for a newer release at launch and every 6 hours. You can also run
+   **Check for updates** from the command palette or **Settings › Updates**.
+2. When one exists, an **Update available** card appears in the sidebar. Click
+   **Update**.
+3. Promptly downloads the build for your platform and verifies its SHA-256 against
+   the release's `SHA256SUMS`. It won't install a build without a matching checksum.
+4. It replaces `Promptly.app` (or the `promptly` and `promptly-ctl` binaries from the
+   Linux tarball) in place.
+5. Click **Restart now**. Your sessions are offered back on launch, and Claude
+   sessions resume with `claude --resume`.
+
+From a script: `promptly-ctl action check_updates`, then `promptly-ctl action install_update`.
+To turn off automatic checks:
+
+```toml
+[updates]
+check = false
+```
+
+`.deb` installs live under `/usr`, so update those with the newer `.deb` from the
+release page. Development builds (`cargo run`) don't self-update.
+
+> The first in-app update needs **v2026.2 or later** installed, because v2026.1 shipped
+> without the updater. Install v2026.2 manually once; after that, Promptly updates
+> itself.
 
 ### Build from source
 
@@ -315,8 +346,9 @@ Losing any one signal degrades a feature, never the terminal.
   Embedded paste terminators are removed so content can't escape bracketed-paste mode.
 - **Credentials stay with the CLI.** Promptly never reads, stores or proxies API keys
   or logins.
-- **Local only.** No account and no telemetry. "Copy diagnostics" redacts
-  token-looking values.
+- **Local only.** No account and no telemetry. The only network request Promptly
+  itself makes is the update check to the GitHub Releases API, which you can turn
+  off with `[updates] check = false`. "Copy diagnostics" redacts token-looking values.
 
 ---
 
@@ -344,9 +376,9 @@ holds. Last verified against **Claude Code 2.1.286**.
 
 ## Roadmap
 
-`v2026.1` is the first public build. Next:
+Next:
 
-- [ ] Signed and notarized macOS builds; a signed update feed
+- [ ] Signed and notarized macOS builds; signed (not only checksummed) updates
 - [ ] A separate PTY-owner process so sessions survive a UI restart
 - [ ] Clicking a notification on macOS opens the session (needs the signed bundle)
 - [ ] Ligatures (HarfBuzz shaping) and screen-reader access to the terminal grid

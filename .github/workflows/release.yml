@@ -64,6 +64,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Checksums (verified by the in-app updater)
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           name: Promptly ${{ github.ref_name }}

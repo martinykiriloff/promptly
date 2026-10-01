@@ -76,6 +76,8 @@ enum Action {
     RemoveWorktree,
     TranscriptView,
     Usage,
+    CheckUpdates,
+    InstallUpdate,
 }
 
 const ACTIONS: &[(Action, &str, &str, &str)] = &[
@@ -199,6 +201,18 @@ const ACTIONS: &[(Action, &str, &str, &str)] = &[
         "primary+shift+t",
     ),
     (Action::Usage, "usage", "Usage dashboard", "primary+u"),
+    (
+        Action::CheckUpdates,
+        "check_updates",
+        "Check for updates",
+        "",
+    ),
+    (
+        Action::InstallUpdate,
+        "install_update",
+        "Install available update",
+        "",
+    ),
 ];
 
 struct Palette {
@@ -245,6 +259,7 @@ pub struct App {
     grid_mode: bool,
     usage_mode: bool,
     reduce_motion: bool,
+    update: Arc<Mutex<UpdateState>>,
     paste_review: Option<(PaneId, String)>,
     restore: Option<SavedLayout>,
     index: Arc<Mutex<Option<SessionIndex>>>,
@@ -369,6 +384,7 @@ impl App {
             grid_mode: false,
             usage_mode: false,
             reduce_motion: false,
+            update: Arc::new(Mutex::new(UpdateState::Idle)),
             paste_review: None,
             restore,
             index,
@@ -391,6 +407,20 @@ impl App {
             app.composer_open = l.composer_open;
         }
         app.spawn(NewSession::default());
+        if app.cfg.updates.check {
+            let state = app.update.clone();
+            let ctx = app.ctx.clone();
+            std::thread::Builder::new()
+                .name("update check".into())
+                .spawn(move || {
+                    std::thread::sleep(Duration::from_secs(8));
+                    loop {
+                        check_for_update(&state, &ctx, false);
+                        std::thread::sleep(Duration::from_secs(6 * 3600));
+                    }
+                })
+                .ok();
+        }
         // Open a surface on launch; used for screenshots / golden-image tests.
         match std::env::var("PROMPTLY_DEBUG_OPEN").as_deref() {
             Ok("palette") => app.run(Action::Palette),
@@ -1037,6 +1067,23 @@ impl App {
                 }
             }
             Action::TranscriptView => self.transcript_open = !self.transcript_open,
+            Action::CheckUpdates => {
+                let (state, ctx) = (self.update.clone(), self.ctx.clone());
+                std::thread::spawn(move || check_for_update(&state, &ctx, true));
+            }
+            Action::InstallUpdate => {
+                let release = match &*self.update.lock() {
+                    UpdateState::Available(r) => Some(r.clone()),
+                    _ => None,
+                };
+                match release {
+                    Some(r) => {
+                        let (state, ctx) = (self.update.clone(), self.ctx.clone());
+                        std::thread::spawn(move || install_update(&state, &ctx, r));
+                    }
+                    None => self.toast("No update to install. Use “Check for updates” first."),
+                }
+            }
             Action::Usage => {
                 self.usage_mode = !self.usage_mode;
                 self.grid_mode = false;
@@ -1205,6 +1252,9 @@ impl App {
             if kit::ghost_button(ui, icon, label, sc.as_deref()).clicked() {
                 actions.push(action);
             }
+        }
+        if let Some(a) = self.update_card(ui) {
+            actions.push(a);
         }
 
         let c = self.core.lock();
@@ -1404,6 +1454,95 @@ impl App {
         for a in actions {
             self.run(a);
         }
+    }
+
+    /// Sidebar card shown only while an update is available, installing,
+    /// ready to restart, or failed.
+    fn update_card(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        use theme::tokens as t;
+        let state = self.update.lock().clone();
+        let mut action = None;
+        let (title, body, tone) = match &state {
+            UpdateState::Available(r) => (
+                format!("Update available · v{}", r.version()),
+                String::new(),
+                t::ACCENT_HOVER,
+            ),
+            UpdateState::Working(msg) => ("Updating Promptly".into(), msg.clone(), theme::BLUE),
+            UpdateState::Ready { version, .. } => (
+                format!("v{version} installed"),
+                "Restart to finish. Sessions are offered back on launch.".into(),
+                theme::GREEN,
+            ),
+            UpdateState::Failed(e) => ("Update failed".into(), e.clone(), theme::RED),
+            UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate => return None,
+        };
+        ui.add_space(8.0);
+        egui::Frame::new()
+            .fill(tone.gamma_multiply(0.10))
+            .stroke(egui::Stroke::new(1.0, tone.gamma_multiply(0.35)))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(title).size(13.0).color(t::TEXT));
+                    if !body.is_empty() {
+                        ui.label(RichText::new(body).size(11.5).color(t::TEXT_2));
+                    }
+                    ui.add_space(6.0);
+                    match &state {
+                        UpdateState::Available(r) => {
+                            ui.horizontal(|ui| {
+                                if kit::primary_button(
+                                    ui,
+                                    Some(Icon::Refresh),
+                                    "Update",
+                                    None,
+                                    false,
+                                )
+                                .clicked()
+                                {
+                                    action = Some(Action::InstallUpdate);
+                                }
+                                if ui.button("What’s new").clicked() {
+                                    open_external(&r.html_url);
+                                }
+                            });
+                        }
+                        UpdateState::Working(_) => {
+                            ui.add(egui::Spinner::new().size(14.0));
+                        }
+                        UpdateState::Ready { target, exe, .. } => {
+                            if kit::primary_button(
+                                ui,
+                                Some(Icon::Refresh),
+                                "Restart now",
+                                None,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                self.save_layout();
+                                promptly_core::update::relaunch(target, exe);
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        }
+                        UpdateState::Failed(_) => {
+                            ui.horizontal(|ui| {
+                                if ui.button("Try again").clicked() {
+                                    action = Some(Action::CheckUpdates);
+                                }
+                                if ui.button("Dismiss").clicked() {
+                                    *self.update.lock() = UpdateState::Idle;
+                                }
+                            });
+                        }
+                        _ => {}
+                    }
+                });
+            });
+        action
     }
 
     /// Sidebar card: plan limits with live countdowns, plus today's spend.
@@ -2678,6 +2817,25 @@ impl App {
                 theme::apply_chrome(ctx, self.high_contrast);
             }
             ui.separator();
+            ui.heading("Updates");
+            ui.horizontal(|ui| {
+                ui.label(format!("Promptly {}", current_version()));
+                let status = match &*self.update.lock() {
+                    UpdateState::Checking => "checking…".to_string(),
+                    UpdateState::UpToDate => "up to date".to_string(),
+                    UpdateState::Available(r) => format!("v{} available", r.version()),
+                    UpdateState::Working(m) => m.clone(),
+                    UpdateState::Ready { version, .. } => format!("v{version} ready, restart to finish"),
+                    UpdateState::Failed(e) => e.clone(),
+                    UpdateState::Idle => String::new(),
+                };
+                ui.label(RichText::new(status).color(theme::tokens::TEXT_3));
+                if ui.button("Check now").clicked() {
+                    actions.push(Action::CheckUpdates);
+                }
+            });
+            ui.checkbox(&mut self.cfg.updates.check, "Check for updates automatically");
+            ui.separator();
             ui.horizontal(|ui| {
                 ui.label(RichText::new(Config::path().to_string_lossy()).monospace().small());
                 if ui.button("Reload").clicked() {
@@ -3023,6 +3181,79 @@ impl App {
                 self.toast(format!("Could not start {editor}: {e}"));
             }
         }
+    }
+}
+
+#[derive(Clone)]
+enum UpdateState {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(promptly_core::update::Release),
+    Working(String),
+    Ready {
+        version: String,
+        target: promptly_core::update::InstallTarget,
+        exe: PathBuf,
+    },
+    Failed(String),
+}
+
+/// Version used for update comparison. `PROMPTLY_FAKE_VERSION` lets a test
+/// build pretend to be older to exercise the update flow.
+fn current_version() -> String {
+    std::env::var("PROMPTLY_FAKE_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
+}
+
+fn check_for_update(state: &Mutex<UpdateState>, ctx: &egui::Context, manual: bool) {
+    // Never interrupt an install in progress.
+    if matches!(
+        *state.lock(),
+        UpdateState::Working(_) | UpdateState::Ready { .. }
+    ) {
+        return;
+    }
+    *state.lock() = UpdateState::Checking;
+    let next = match promptly_core::update::check(&current_version()) {
+        Ok(Some(r)) => UpdateState::Available(r),
+        Ok(None) => UpdateState::UpToDate,
+        Err(e) if manual => UpdateState::Failed(format!("Could not check for updates: {e}")),
+        Err(_) => UpdateState::Idle, // background checks fail quietly (offline)
+    };
+    *state.lock() = next;
+    ctx.request_repaint();
+}
+
+fn install_update(
+    state: &Mutex<UpdateState>,
+    ctx: &egui::Context,
+    release: promptly_core::update::Release,
+) {
+    use promptly_core::update;
+    let set = |s: UpdateState| {
+        *state.lock() = s;
+        ctx.request_repaint();
+    };
+    let target = match update::install_target() {
+        Ok(t) => t,
+        Err(e) => return set(UpdateState::Failed(e)),
+    };
+    let work = promptly_core::paths::data_dir()
+        .join("updates")
+        .join(release.version());
+    let progress = |m: &str| set(UpdateState::Working(m.to_string()));
+    let result = update::download_and_verify(&release, &work, &progress).and_then(|staged| {
+        progress("Installing…");
+        update::install(&staged, &target)
+    });
+    let _ = std::fs::remove_dir_all(&work);
+    match result {
+        Ok(exe) => set(UpdateState::Ready {
+            version: release.version().to_string(),
+            target,
+            exe,
+        }),
+        Err(e) => set(UpdateState::Failed(e)),
     }
 }
 

@@ -12,6 +12,7 @@ pub mod sanitize;
 pub mod state;
 pub mod statusline;
 pub mod transcript;
+pub mod update;
 pub mod usage;
 pub mod util;
 

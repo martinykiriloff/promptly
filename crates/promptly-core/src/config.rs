@@ -15,6 +15,7 @@ pub struct Config {
     pub shell_integration: bool,
     pub claude: ClaudeConfig,
     pub notifications: NotificationConfig,
+    pub updates: UpdateConfig,
     /// Per-project profiles, matched by the longest `root` prefix of the cwd.
     pub profiles: Vec<Profile>,
     /// Action name -> shortcut, e.g. `"palette" = "cmd+shift+p"`.
@@ -31,6 +32,7 @@ impl Default for Config {
             shell_integration: true,
             claude: ClaudeConfig::default(),
             notifications: NotificationConfig::default(),
+            updates: UpdateConfig::default(),
             profiles: vec![],
             keybindings: BTreeMap::new(),
             snippets: BTreeMap::from([
@@ -85,6 +87,19 @@ impl Default for NotificationConfig {
             on_finish: true,
             max_per_minute: 6,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// Check GitHub Releases for a newer version at launch and every 6 hours.
+    pub check: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self { check: true }
     }
 }
 
