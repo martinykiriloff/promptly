@@ -11,6 +11,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/promptly target/release/promptly-ctl "$APP/Contents/MacOS/"
 sed "s/__VERSION__/$VERSION/g" packaging/Info.plist > "$APP/Contents/Info.plist"
+cp packaging/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 if [ -n "${APPLE_SIGN_IDENTITY:-}" ]; then
   codesign --force --options runtime --timestamp --sign "$APPLE_SIGN_IDENTITY" "$APP/Contents/MacOS/promptly-ctl"
   codesign --force --options runtime --timestamp --sign "$APPLE_SIGN_IDENTITY" "$APP"

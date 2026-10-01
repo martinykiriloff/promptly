@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/logo.png" width="128" height="128" alt="Promptly icon">
+
 # Promptly
 
 **The terminal built for Claude Code.**

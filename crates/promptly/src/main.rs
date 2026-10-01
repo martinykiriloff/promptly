@@ -52,7 +52,13 @@ fn main() -> eframe::Result<()> {
             // bar and the traffic lights sit over the sidebar.
             .with_fullsize_content_view(cfg!(target_os = "macos"))
             .with_title_shown(!cfg!(target_os = "macos"))
-            .with_titlebar_shown(!cfg!(target_os = "macos")),
+            .with_titlebar_shown(!cfg!(target_os = "macos"))
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../../../packaging/icon/promptly-512.png"
+                ))
+                .unwrap_or_default(),
+            ),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };

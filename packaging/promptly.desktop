@@ -3,6 +3,7 @@ Type=Application
 Name=Promptly
 Comment=A terminal built for Claude Code sessions
 Exec=promptly
+Icon=promptly
 Terminal=false
 Categories=System;TerminalEmulator;Development;
 StartupWMClass=dev.promptly.Promptly

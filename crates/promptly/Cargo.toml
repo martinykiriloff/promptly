@@ -25,6 +25,7 @@ assets = [
   ["target/release/promptly", "usr/bin/", "755"],
   ["target/release/promptly-ctl", "usr/bin/", "755"],
   ["../../packaging/promptly.desktop", "usr/share/applications/", "644"],
+  ["../../packaging/icon/promptly-512.png", "usr/share/icons/hicolor/512x512/apps/promptly.png", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -32,4 +33,5 @@ assets = [
   { source = "target/release/promptly", dest = "/usr/bin/promptly", mode = "755" },
   { source = "target/release/promptly-ctl", dest = "/usr/bin/promptly-ctl", mode = "755" },
   { source = "packaging/promptly.desktop", dest = "/usr/share/applications/promptly.desktop", mode = "644" },
+  { source = "packaging/icon/promptly-512.png", dest = "/usr/share/icons/hicolor/512x512/apps/promptly.png", mode = "644" },
 ]

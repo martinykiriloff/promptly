@@ -6,6 +6,7 @@
   <key>CFBundleDisplayName</key><string>Promptly</string>
   <key>CFBundleIdentifier</key><string>dev.promptly.Promptly</string>
   <key>CFBundleExecutable</key><string>promptly</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>__VERSION__</string>
   <key>CFBundleVersion</key><string>__VERSION__</string>
