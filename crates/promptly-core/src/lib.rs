@@ -2,6 +2,7 @@
 //! this crate derives; `promptly-ctl` uses its IPC client.
 
 pub mod attention;
+pub mod commands;
 pub mod config;
 pub mod git;
 pub mod hooks;

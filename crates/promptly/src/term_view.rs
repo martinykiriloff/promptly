@@ -70,6 +70,9 @@ pub struct ViewOutput {
     /// A paste that needs the user's confirmation first.
     pub paste_for_review: Option<String>,
     pub open_url: Option<String>,
+    /// Typing that belongs in the composer (Claude's own input is hidden).
+    /// `Some("")` means "just focus the composer".
+    pub redirect: Option<String>,
 }
 
 pub struct ViewOptions {
@@ -79,6 +82,8 @@ pub struct ViewOptions {
     pub request_focus: bool,
     /// Keyboard input is consumed by an overlay (palette, dialog).
     pub keyboard_blocked: bool,
+    /// Hide Claude Code's input box; the composer replaces it.
+    pub hide_claude_input: bool,
 }
 
 pub fn cell_size(ctx: &egui::Context, font: &FontId) -> egui::Vec2 {
@@ -124,7 +129,7 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
         (cell.y * ppp) as u16,
     );
 
-    let to_point = |pos: egui::Pos2, display_offset: usize| -> (Point, Side) {
+    let to_point_raw = |pos: egui::Pos2, display_offset: usize| -> (Point, Side) {
         let x = ((pos.x - rect.min.x) / cell.x).clamp(0.0, cols as f32 - 0.001);
         let y = ((pos.y - rect.min.y) / cell.y).clamp(0.0, lines as f32 - 0.001);
         let side = if x.fract() < 0.5 {
@@ -135,17 +140,42 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
         let vp = Point::<usize>::new(y as usize, Column(x as usize));
         (viewport_to_point(display_offset, vp), side)
     };
+    let to_point =
+        |pos: egui::Pos2, display_offset: usize, hidden: Option<(usize, usize)>| -> (Point, Side) {
+            let (mut p, side) = to_point_raw(pos, display_offset);
+            // Rows below a collapsed input box are drawn higher than they are.
+            if let Some((a, b)) = hidden {
+                let drawn = (p.line.0 + display_offset as i32).max(0) as usize;
+                if drawn >= a {
+                    p.line.0 += (b - a + 1) as i32;
+                }
+            }
+            (p, side)
+        };
 
     let mut term = pane.term.lock();
     let mode = *term.mode();
     let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
+    // Rows of Claude Code's input box, collapsed when the composer replaces it.
+    let hidden = (opts.hide_claude_input && opts.claude_pane && term.grid().display_offset() == 0)
+        .then(|| claude_input_rows(&term))
+        .flatten();
+    let gap = hidden.map(|(a, b)| b - a + 1).unwrap_or(0);
+    // Screen line -> drawn line (None when hidden).
+    let draw_line = |line: usize| -> Option<usize> {
+        match hidden {
+            Some((a, b)) if (a..=b).contains(&line) => None,
+            Some((_, b)) if line > b => Some(line - gap),
+            _ => Some(line),
+        }
+    };
 
     // ------------------------------------------------------------ mouse
     let mods = ui.input(|i| i.modifiers);
     let report_mouse = mouse_mode && !mods.shift;
     if let Some(pos) = resp.interact_pointer_pos().or(resp.hover_pos()) {
         let display_offset = term.grid().display_offset();
-        let (point, side) = to_point(pos, display_offset);
+        let (point, side) = to_point(pos, display_offset, hidden);
         let vp_line = (point.line.0 + display_offset as i32).max(0) as usize;
         let (pressed, released, primary_down) = ui.input(|i| {
             (
@@ -243,7 +273,7 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
             st.scroll_accum -= n as f32;
             if n != 0 {
                 if report_mouse {
-                    let (pt, _) = to_point(resp.hover_pos().unwrap_or(rect.min), 0);
+                    let (pt, _) = to_point(resp.hover_pos().unwrap_or(rect.min), 0, hidden);
                     let b = if n > 0 { 64 } else { 65 };
                     for _ in 0..n.abs() {
                         pane.write(mouse_report(
@@ -281,6 +311,23 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
                     if modifiers.mac_cmd || (modifiers.command && modifiers.shift) {
                         continue; // app shortcuts
                     }
+                    // Editing keys belong to the composer while Claude's input is hidden;
+                    // Esc and Ctrl combinations (interrupt) still reach Claude.
+                    if hidden.is_some()
+                        && !modifiers.ctrl
+                        && !modifiers.alt
+                        && matches!(
+                            key,
+                            egui::Key::Enter
+                                | egui::Key::Backspace
+                                | egui::Key::Tab
+                                | egui::Key::ArrowUp
+                                | egui::Key::ArrowDown
+                        )
+                    {
+                        out.redirect.get_or_insert_with(String::new);
+                        continue;
+                    }
                     if modifiers.shift && matches!(key, egui::Key::PageUp | egui::Key::PageDown) {
                         let s = if key == egui::Key::PageUp {
                             Scroll::PageUp
@@ -304,8 +351,12 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
                 }
                 egui::Event::Text(t) => {
                     if !suppress_text && !t.is_empty() {
-                        pane.write(t.into_bytes());
-                        out.typed = true;
+                        if hidden.is_some() {
+                            out.redirect.get_or_insert_with(String::new).push_str(&t);
+                        } else {
+                            pane.write(t.into_bytes());
+                            out.typed = true;
+                        }
                     }
                     suppress_text = false;
                 }
@@ -324,6 +375,9 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
                 }
                 egui::Event::Cut if cfg!(target_os = "linux") && !mods.shift => {
                     pane.write(b"\x18".as_slice());
+                }
+                egui::Event::Paste(text) if hidden.is_some() => {
+                    out.redirect.get_or_insert_with(String::new).push_str(&text);
                 }
                 egui::Event::Paste(text) => {
                     if cfg!(target_os = "linux") && !mods.shift {
@@ -409,8 +463,11 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
         } else {
             1.0
         };
+        let Some(line) = draw_line(vp.line) else {
+            continue;
+        };
         let x = rect.min.x + vp.column.0 as f32 * cell.x;
-        let y = rect.min.y + vp.line as f32 * cell.y;
+        let y = rect.min.y + line as f32 * cell.y;
         let cell_rect = Rect::from_min_size(
             pos2(snap(x), snap(y)),
             vec2(snap(cell.x * width) + 0.5, snap(cell.y) + 0.5),
@@ -445,7 +502,7 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
         // fallback-font glyphs can never shift the grid.
         let continues = simple
             && !hidden
-            && run_line == vp.line
+            && run_line == line
             && color == run_color
             && run_start + run.chars().count() == vp.column.0;
         if !continues {
@@ -457,7 +514,7 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
         if simple {
             if run.is_empty() {
                 run_start = vp.column.0;
-                run_line = vp.line;
+                run_line = line;
                 run_color = color;
             }
             run.push(ch);
@@ -481,9 +538,10 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
     if mode.contains(TermMode::SHOW_CURSOR)
         && display_offset == 0
         && let Some(vp) = point_to_viewport(display_offset, cursor.point)
+        && let Some(cline) = draw_line(vp.line)
     {
         let x = snap(rect.min.x + vp.column.0 as f32 * cell.x);
-        let y = snap(rect.min.y + vp.line as f32 * cell.y);
+        let y = snap(rect.min.y + cline as f32 * cell.y);
         let r = Rect::from_min_size(pos2(x, y), cell);
         match (focused, cursor.shape) {
             (_, CursorShape::Hidden) => {}
@@ -613,6 +671,41 @@ pub fn screen_text(pane: &Pane, max_lines: usize) -> Vec<String> {
     lines.split_off(skip)
 }
 
+/// Screen rows of Claude Code's prompt box: a horizontal rule (or a rounded
+/// box top), one or more prompt lines starting with `❯`/`>`, and a closing
+/// rule, near the bottom of the screen. `None` while Claude shows a menu or
+/// permission prompt in its place, so those always stay visible.
+pub fn claude_input_rows<T>(term: &alacritty_terminal::Term<T>) -> Option<(usize, usize)> {
+    let grid = term.grid();
+    let n = term.screen_lines();
+    let cols = term.columns();
+    let row_text = |l: usize| -> String {
+        let row = &grid[Line(l as i32)];
+        (0..cols).map(|c| row[Column(c)].c).collect::<String>()
+    };
+    let is_rule = |s: &str| {
+        let t = s.trim();
+        let rule = t.chars().filter(|c| *c == '─').count();
+        rule * 10 >= cols * 6 && t.chars().all(|c| "─╭╮╰╯".contains(c))
+    };
+    let is_prompt = |s: &str| {
+        let t = s.trim_start().trim_start_matches('│').trim_start();
+        t.starts_with('❯') || t.starts_with('>')
+    };
+    let lowest = n.saturating_sub(14);
+    for b in (lowest..n).rev() {
+        if !is_rule(&row_text(b)) {
+            continue;
+        }
+        for a in (b.saturating_sub(24)..b.saturating_sub(1)).rev() {
+            if is_rule(&row_text(a)) {
+                return (b - a >= 2 && is_prompt(&row_text(a + 1))).then_some((a, b));
+            }
+        }
+    }
+    None
+}
+
 fn cell_fg(
     c: Color,
     flags: Flags,
@@ -697,4 +790,74 @@ fn link_at<T>(term: &alacritty_terminal::Term<T>, p: Point) -> Option<String> {
         .any(|s| word.starts_with(s));
     let is_path = word.starts_with('/') || word.starts_with("~/") || word.starts_with("./");
     (is_url || is_path).then_some(word)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::term::{Config, Term};
+    use alacritty_terminal::vte::ansi::Processor;
+
+    fn term_with(lines: &[&str]) -> Term<VoidListener> {
+        let mut t = Term::new(
+            Config::default(),
+            &GridSize {
+                cols: 40,
+                lines: 10,
+            },
+            VoidListener,
+        );
+        let mut p: Processor = Processor::new();
+        let body = lines.join("\r\n");
+        p.advance(&mut t, body.as_bytes());
+        t
+    }
+
+    #[test]
+    fn finds_claude_input_box() {
+        let rule = "─".repeat(40);
+        let t = term_with(&[
+            "⏺ Done.",
+            "",
+            &rule,
+            "❯ push and tag",
+            &rule,
+            "  Model: Opus 5.5 | Ctx: 865k",
+        ]);
+        assert_eq!(claude_input_rows(&t), Some((2, 4)));
+        // Multi-line input and the older rounded box.
+        let top = format!("╭{}╮", "─".repeat(38));
+        let bot = format!("╰{}╯", "─".repeat(38));
+        let t = term_with(&[
+            "x",
+            &top,
+            "│ > first line",
+            "│   second line",
+            &bot,
+            "  ? for shortcuts",
+        ]);
+        assert_eq!(claude_input_rows(&t), Some((1, 4)));
+    }
+
+    #[test]
+    fn leaves_menus_and_permission_prompts_visible() {
+        let rule = "─".repeat(40);
+        let t = term_with(&[
+            &rule,
+            " Bash command",
+            "   curl -sI https://example.com",
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. No",
+            &rule,
+        ]);
+        assert_eq!(
+            claude_input_rows(&t),
+            None,
+            "the line after the top rule isn't a prompt"
+        );
+        let t = term_with(&["$ ls", "a b c"]);
+        assert_eq!(claude_input_rows(&t), None);
+    }
 }

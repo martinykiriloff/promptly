@@ -13,4 +13,6 @@ pub enum AppEvent {
     IndexRefreshed,
     /// Press Enter in a pane (deferred after a composer paste).
     Submit(PaneId),
+    /// Write bytes to a pane (paced input from the composer).
+    Input(PaneId, Vec<u8>),
 }

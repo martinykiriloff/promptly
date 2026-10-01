@@ -278,6 +278,8 @@ pub struct App {
     /// Off by default: show Claude's thinking (Settings › Claude).
     show_thinking: bool,
     thinking_open: bool,
+    /// Off by default: Promptly's composer replaces Claude Code's input box.
+    show_claude_input: bool,
     update: Arc<Mutex<UpdateState>>,
     paste_review: Option<(PaneId, String)>,
     restore: Option<SavedLayout>,
@@ -406,6 +408,7 @@ impl App {
             reduce_motion: false,
             show_thinking: false,
             thinking_open: false,
+            show_claude_input: false,
             update: Arc::new(Mutex::new(UpdateState::Idle)),
             paste_review: None,
             restore,
@@ -423,6 +426,7 @@ impl App {
         };
         let prefs = Prefs::load();
         app.show_thinking = prefs.show_thinking;
+        app.show_claude_input = prefs.show_claude_input;
         app.thinking_open = prefs.show_thinking && prefs.thinking_open;
         app.reduce_motion = prefs.reduce_motion;
         app.option_as_meta = prefs.option_as_meta;
@@ -763,6 +767,13 @@ impl App {
     }
 
     fn send_prompt(&mut self, id: PaneId, text: &str) {
+        self.send_message(id, text, &[]);
+    }
+
+    /// Type a message into a Claude session: each attachment as a pasted
+    /// file path (Claude Code turns image paths into attached images), then
+    /// the text, then Enter. Pastes are paced so the TUI sees each one.
+    fn send_message(&mut self, id: PaneId, text: &str, attachments: &[PathBuf]) {
         let Some(e) = self.panes.get(&id) else { return };
         let bracketed = e
             .pane
@@ -770,11 +781,24 @@ impl App {
             .lock()
             .mode()
             .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
-        e.pane
-            .write(sanitize::encode_paste(text.trim_end(), bracketed));
-        // Give the TUI a moment to ingest the paste before submitting.
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        for p in attachments {
+            chunks.push(sanitize::encode_paste(
+                &crate::composer::escape_path(p),
+                bracketed,
+            ));
+            chunks.push(b" ".to_vec());
+        }
+        if !text.trim().is_empty() {
+            chunks.push(sanitize::encode_paste(text.trim_end(), bracketed));
+        }
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         std::thread::spawn(move || {
+            for c in chunks {
+                let _ = tx.send(AppEvent::Input(id, c));
+                ctx.request_repaint();
+                std::thread::sleep(Duration::from_millis(45));
+            }
             std::thread::sleep(Duration::from_millis(60));
             let _ = tx.send(AppEvent::Submit(id));
             ctx.request_repaint();
@@ -821,6 +845,11 @@ impl App {
                 AppEvent::FocusSession(id) => {
                     self.focus(id);
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                AppEvent::Input(id, bytes) => {
+                    if let Some(e) = self.panes.get(&id) {
+                        e.pane.write(bytes);
+                    }
                 }
                 AppEvent::Submit(id) => {
                     if let Some(e) = self.panes.get(&id) {
@@ -1563,6 +1592,7 @@ impl App {
     fn save_prefs(&self) {
         Prefs {
             show_thinking: self.show_thinking,
+            show_claude_input: self.show_claude_input,
             thinking_open: self.thinking_open,
             reduce_motion: self.reduce_motion,
             option_as_meta: self.option_as_meta,
@@ -2445,6 +2475,7 @@ impl App {
             option_as_meta: self.option_as_meta,
             request_focus: request_focus && !searching,
             keyboard_blocked: overlay_open,
+            hide_claude_input: !self.show_claude_input,
         };
         let Some(e) = self.panes.get_mut(&id) else {
             return;
@@ -2464,6 +2495,10 @@ impl App {
         }
         if let Some(p) = out.paste_for_review {
             self.paste_review = Some((id, p));
+        }
+        if let Some(text) = out.redirect {
+            self.composer_open = true;
+            self.composer.insert_text(&text);
         }
         if out.typed {
             let mut c = self.core.lock();
@@ -3122,6 +3157,8 @@ impl App {
             }
             ui.checkbox(&mut self.cfg.claude.inject_hooks, "Inject session-scoped hooks (applies to new sessions)");
             ui.checkbox(&mut self.cfg.claude.wrap_statusline, "Wrap the status line to read cost and context % (chains to your own)");
+            ui.checkbox(&mut self.show_claude_input, "Show Claude Code's own input box")
+                .on_hover_text("Off: Promptly's composer is the only input; Claude's input box is hidden and typing in the terminal goes to the composer. Claude's menus and permission prompts always stay visible.");
             if ui
                 .checkbox(&mut self.show_thinking, "Show Claude's thinking")
                 .on_hover_text("Adds a Thinking panel with Claude's reasoning, tool calls and replies, and shows the latest thought in the sidebar while a session works.")
@@ -3371,6 +3408,55 @@ impl eframe::App for App {
         if !overlay_open {
             self.handle_shortcuts(&ctx);
         }
+        // Files dropped anywhere on the window become composer attachments.
+        let (dropped, hovering) = ctx.input(|i| {
+            (
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .map(|f| f.path().to_path_buf())
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .collect::<Vec<_>>(),
+                !i.raw.hovered_files.is_empty(),
+            )
+        });
+        if !dropped.is_empty() {
+            self.composer_open = true;
+            self.composer.attach(dropped);
+        }
+        if hovering {
+            let screen = ctx.content_rect();
+            egui::Area::new(egui::Id::new("drop-overlay"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(screen.min)
+                .interactable(false)
+                .show(&ctx, |ui| {
+                    ui.painter()
+                        .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(150));
+                    let r = egui::Rect::from_center_size(screen.center(), egui::vec2(420.0, 120.0));
+                    ui.painter().rect(
+                        r,
+                        egui::CornerRadius::same(16),
+                        theme::tokens::BG_ELEVATED,
+                        egui::Stroke::new(2.0, theme::tokens::ACCENT_HOVER),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.painter().text(
+                        r.center() - egui::vec2(0.0, 12.0),
+                        egui::Align2::CENTER_CENTER,
+                        "Drop to attach",
+                        egui::FontId::proportional(20.0),
+                        theme::tokens::TEXT,
+                    );
+                    ui.painter().text(
+                        r.center() + egui::vec2(0.0, 18.0),
+                        egui::Align2::CENTER_CENTER,
+                        "Screenshots, PDFs, videos or any file",
+                        egui::FontId::proportional(13.0),
+                        theme::tokens::TEXT_2,
+                    );
+                });
+        }
         let waiting = self.core.lock().attention.len();
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(if waiting > 0 {
             format!("Promptly ({waiting})")
@@ -3453,10 +3539,13 @@ impl eframe::App for App {
                         .composer
                         .show(ui, &cwd, &self.cfg.snippets.clone(), &target)
                     {
-                        Some(ComposerAction::Send(text)) => {
+                        Some(ComposerAction::Send { text, attachments }) => {
                             if let Some(id) = self.active {
-                                self.send_prompt(id, &text);
-                                self.focus_terminal = true;
+                                self.send_message(id, &text, &attachments);
+                                // With Claude's own input hidden, the composer keeps focus.
+                                if self.show_claude_input {
+                                    self.focus_terminal = true;
+                                }
                             }
                         }
                         Some(ComposerAction::FocusTerminal) => self.focus_terminal = true,
@@ -3614,6 +3703,7 @@ fn install_update(
 #[serde(default)]
 struct Prefs {
     show_thinking: bool,
+    show_claude_input: bool,
     thinking_open: bool,
     reduce_motion: bool,
     option_as_meta: bool,
