@@ -1,6 +1,7 @@
 //! Promptly: a terminal whose first-class citizen is a Claude Code session.
 
 mod app;
+mod ask;
 mod charts;
 mod composer;
 mod events;

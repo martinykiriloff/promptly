@@ -49,8 +49,25 @@ fn shots() {
     render(&mut h, &dir, "01-main");
     for (name, f) in crate::app::shot_scenes() {
         f(h.state_mut());
+        // Wait for a real Claude reply when a scene asks for a command.
+        let t0 = std::time::Instant::now();
+        while h.state().ask_pending() && t0.elapsed().as_secs() < 90 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         render(&mut h, &dir, name);
     }
+    // Press Enter on the last safe suggestion: it should run in the shell.
+    h.state_mut().run_ask_scene();
+    let t0 = std::time::Instant::now();
+    while h.state().ask_pending() && t0.elapsed().as_secs() < 90 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    render(&mut h, &dir, "18-ask-ready");
+    h.key_press(egui::Key::Enter);
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    render(&mut h, &dir, "19-ask-ran");
     // Open the account switcher (top of the sidebar) with a real click.
     let at = egui::pos2(150.0, 34.0 + 22.0);
     for pressed in [true, false] {

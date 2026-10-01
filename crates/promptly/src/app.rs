@@ -84,6 +84,7 @@ enum Action {
     ToggleThinking,
     SwitchAccount,
     AddAccount,
+    AskCommand,
 }
 
 const ACTIONS: &[(Action, &str, &str, &str)] = &[
@@ -94,6 +95,12 @@ const ACTIONS: &[(Action, &str, &str, &str)] = &[
         "primary+shift+a",
     ),
     (Action::AddAccount, "add_account", "Add Claude account", ""),
+    (
+        Action::AskCommand,
+        "ask_command",
+        "Ask Claude for a shell command",
+        "primary+i",
+    ),
     (
         Action::Palette,
         "palette",
@@ -280,6 +287,16 @@ pub struct App {
     palette: Option<Palette>,
     history: Option<HistoryPicker>,
     fanout: Option<FanOut>,
+    /// Plain-English request being turned into a command (shell panes).
+    ask: Option<crate::ask::Ask>,
+    /// Commands the user's shell knows; filled in the background.
+    known_commands: Arc<Mutex<Arc<std::collections::HashSet<String>>>>,
+    /// Turn plain English typed in a shell pane into a command.
+    ai_commands: bool,
+    /// Send the last lines of the terminal along with the request.
+    ai_output: bool,
+    /// Model for generated commands ("sonnet" or "haiku").
+    ai_model: String,
     /// Name typed in the "Add account" sheet, while it is open.
     add_account: Option<String>,
     /// Last time account identities were re-read (to catch a `/login`).
@@ -436,6 +453,11 @@ impl App {
             palette: None,
             history: None,
             fanout: None,
+            ask: None,
+            known_commands: Arc::default(),
+            ai_commands: true,
+            ai_output: true,
+            ai_model: "sonnet".into(),
             add_account: None,
             accounts_checked: Instant::now(),
             settings_open: false,
@@ -469,6 +491,17 @@ impl App {
         app.reduce_motion = prefs.reduce_motion;
         app.option_as_meta = prefs.option_as_meta;
         app.high_contrast = prefs.high_contrast;
+        app.ai_commands = prefs.ai_commands;
+        app.ai_output = prefs.ai_output;
+        app.ai_model = prefs.ai_model.clone();
+        {
+            let known = app.known_commands.clone();
+            let shell = shell_integration::user_shell(app.cfg.shell.as_deref());
+            std::thread::Builder::new()
+                .name("known commands".into())
+                .spawn(move || *known.lock() = Arc::new(crate::ask::load_known_commands(&shell)))
+                .ok();
+        }
         if app.high_contrast {
             theme::apply_chrome(&app.ctx, true);
         }
@@ -634,29 +667,7 @@ impl App {
             }
             // Run through the user's login shell so PATH (nvm, ~/.local/bin)
             // matches what they get in their own terminal.
-            let bin = self.cfg.claude.binary.clone();
-            let sh_name = Path::new(&shell)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-            let sh_args = if sh_name == "fish" {
-                let cmd = std::iter::once(bin)
-                    .chain(args)
-                    .map(|a| hooks::shell_quote(&a))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                vec!["-l".into(), "-c".into(), format!("exec {cmd}")]
-            } else {
-                let mut v = vec![
-                    "-l".into(),
-                    "-i".into(),
-                    "-c".into(),
-                    r#"exec "$0" "$@""#.into(),
-                    bin,
-                ];
-                v.extend(args);
-                v
-            };
+            let sh_args = login_shell_exec(&shell, self.cfg.claude.binary.clone(), args);
             (PaneKind::Claude { session_id }, shell.clone(), sh_args)
         } else {
             let (program, args) =
@@ -1266,6 +1277,13 @@ impl App {
                 self.switch_account(&next);
             }
             Action::AddAccount => self.add_account = Some(String::new()),
+            Action::AskCommand => {
+                self.composer_open = true;
+                if !self.composer.text.trim_start().starts_with('#') {
+                    self.composer.text = format!("# {}", self.composer.text.trim_start());
+                }
+                self.composer.focus_requested = true;
+            }
         }
     }
 
@@ -1398,6 +1416,120 @@ impl App {
             .iter()
             .find(|(x, _)| *x == a)
             .map(|(_, s)| self.ctx.format_shortcut(s))
+    }
+
+    /// Ask Claude to turn `request` into a command for shell pane `id`.
+    fn start_ask(&mut self, id: PaneId, request: String) {
+        static OS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let os = OS
+            .get_or_init(promptly_core::nl_command::os_description)
+            .clone();
+        let shell = shell_integration::user_shell(self.cfg.shell.as_deref());
+        let known = self.known_commands.lock().clone();
+        // A follow-up refines the suggestion on screen.
+        let previous = self
+            .ask
+            .as_ref()
+            .filter(|a| a.pane == id)
+            .and_then(|a| a.ready().map(|s| (a.request.clone(), s.command)));
+        let recent_output = if self.ai_output {
+            self.panes
+                .get(&id)
+                .map(|e| term_view::screen_text(&e.pane, 30))
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let (cwd, config_dir) = {
+            let c = self.core.lock();
+            let m = c.sessions.get(&id);
+            let cwd = m
+                .map(|m| m.cwd.clone())
+                .unwrap_or_else(|| self.default_cwd());
+            let acct = m
+                .and_then(|m| c.account(&m.account))
+                .unwrap_or_else(|| c.active());
+            (cwd, acct.env_value())
+        };
+        let context = promptly_core::nl_command::ShellContext {
+            os,
+            shell: Path::new(&shell)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            package_managers: promptly_core::nl_command::package_managers(&known),
+            recent_output,
+            previous,
+        };
+        self.ask = Some(crate::ask::Ask::start(
+            id,
+            request,
+            context,
+            crate::ask::Launch {
+                shell,
+                binary: self.cfg.claude.binary.clone(),
+                model: self.ai_model.clone(),
+                cwd,
+                config_dir,
+            },
+            self.ctx.clone(),
+        ));
+        self.composer.focus_requested = true;
+    }
+
+    /// Suggestion card above the composer, plus its keys: Enter runs,
+    /// Tab edits, Esc dismisses (while the composer is empty and focused).
+    fn ask_card(&mut self, ui: &mut egui::Ui) {
+        use crate::ask::CardAction;
+        let Some(ask) = self.ask.as_ref().filter(|a| Some(a.pane) == self.active) else {
+            return;
+        };
+        let mut act = crate::ask::card(ui, ask);
+        ui.add_space(8.0);
+        let composer_focused = ui.memory(|m| m.has_focus(crate::composer::edit_id()));
+        if act.is_none() && composer_focused && self.composer.text.trim().is_empty() {
+            let ready = ask.ready();
+            ui.input_mut(|i| {
+                if i.consume_key(Modifiers::NONE, Key::Escape) {
+                    act = Some(CardAction::Dismiss);
+                } else if let Some(s) = &ready {
+                    if s.risk != promptly_core::nl_command::Risk::Danger
+                        && i.consume_key(Modifiers::NONE, Key::Enter)
+                    {
+                        act = Some(CardAction::Run(s.command.clone()));
+                    } else if i.consume_key(Modifiers::NONE, Key::Tab) {
+                        act = Some(CardAction::Edit(s.command.clone()));
+                    }
+                }
+            });
+        }
+        match act {
+            Some(CardAction::Run(cmd)) => {
+                let pane = ask.pane;
+                self.ask = None;
+                self.send_message(pane, &cmd, &[]);
+                self.composer.focus_requested = true;
+            }
+            Some(CardAction::Edit(cmd)) => {
+                self.ask = None;
+                self.composer.set_command(cmd);
+            }
+            Some(CardAction::Copy(cmd)) => {
+                ui.ctx().copy_text(cmd);
+                self.toast("Command copied");
+            }
+            Some(CardAction::Retry) => {
+                let (pane, request) = (ask.pane, ask.request.clone());
+                self.ask = None;
+                self.start_ask(pane, request);
+            }
+            Some(CardAction::Dismiss) => {
+                self.ask = None;
+                self.composer.focus_requested = true;
+            }
+            None => {}
+        }
     }
 
     fn switch_account(&mut self, id: &str) {
@@ -1945,6 +2077,9 @@ impl App {
             reduce_motion: self.reduce_motion,
             option_as_meta: self.option_as_meta,
             high_contrast: self.high_contrast,
+            ai_commands: self.ai_commands,
+            ai_output: self.ai_output,
+            ai_model: self.ai_model.clone(),
         }
         .save();
     }
@@ -3550,6 +3685,7 @@ impl App {
             self.reduce_motion,
             self.option_as_meta,
             self.high_contrast,
+            (self.ai_commands, self.ai_output, self.ai_model.clone()),
         );
         let modal = egui::Modal::new(egui::Id::new("settings"))
             .frame(
@@ -3639,6 +3775,7 @@ impl App {
                 self.reduce_motion,
                 self.option_as_meta,
                 self.high_contrast,
+                (self.ai_commands, self.ai_output, self.ai_model.clone()),
             )
         {
             self.save_prefs();
@@ -3762,6 +3899,35 @@ impl App {
                     if changed {
                         self.thinking_open = self.show_thinking;
                     }
+                });
+                kit::settings_group(ui, Some("Shell commands"), |ui| {
+                    kit::setting_row(
+                        ui,
+                        true,
+                        "Turn plain English into commands",
+                        "In shell tabs, \"install nvm using brew\" asks Claude for the command. Start with # to always ask.",
+                        switch(&mut self.ai_commands),
+                    );
+                    kit::setting_row(
+                        ui,
+                        false,
+                        "Include recent terminal output",
+                        "Sends the last 30 lines so \"fix that error\" works.",
+                        switch(&mut self.ai_output),
+                    );
+                    kit::setting_row(
+                        ui,
+                        false,
+                        "Model",
+                        "Uses your Claude login; nothing is saved to history.",
+                        |ui| {
+                            for (id, label) in [("haiku", "Haiku"), ("sonnet", "Sonnet")] {
+                                if ui.selectable_label(self.ai_model == id, label).clicked() {
+                                    self.ai_model = id.into();
+                                }
+                            }
+                        },
+                    );
                 });
                 kit::settings_group(ui, Some("Integration"), |ui| {
                     kit::setting_row(
@@ -4240,19 +4406,28 @@ impl eframe::App for App {
                         }),
                 )
                 .show(ui, |ui| {
-                    let (cwd, target, claude_dir) = {
+                    let (cwd, target, claude_dir, is_shell) = {
                         let c = self.core.lock();
                         let m = self.active.and_then(|id| c.sessions.get(&id));
+                        let is_shell = m.is_some_and(|m| !m.is_claude());
                         let dir = m
                             .and_then(|m| c.account(&m.account))
                             .unwrap_or_else(|| c.active())
                             .dir
                             .clone();
                         match m {
-                            Some(m) => (m.cwd.clone(), m.display_name(), dir),
-                            None => (promptly_core::paths::home(), "no session".into(), dir),
+                            Some(m) => (m.cwd.clone(), m.display_name(), dir, is_shell),
+                            None => (
+                                promptly_core::paths::home(),
+                                "no session".into(),
+                                dir,
+                                false,
+                            ),
                         }
                     };
+                    self.composer.shell_mode = is_shell && self.ai_commands;
+                    self.composer.known_commands = self.known_commands.lock().clone();
+                    self.ask_card(ui);
                     let send_sc = self.sc(Action::ToggleComposer);
                     let _ = send_sc;
                     match self.composer.show(
@@ -4269,6 +4444,11 @@ impl eframe::App for App {
                                 if self.show_claude_input {
                                     self.focus_terminal = true;
                                 }
+                            }
+                        }
+                        Some(ComposerAction::Ask { request }) => {
+                            if let Some(id) = self.active {
+                                self.start_ask(id, request);
                             }
                         }
                         Some(ComposerAction::FocusTerminal) => self.focus_terminal = true,
@@ -4426,6 +4606,26 @@ fn install_update(
 pub type Scene = (&'static str, fn(&mut App));
 
 #[cfg(test)]
+impl App {
+    /// Ask for a harmless command (the Enter-runs-it check).
+    pub fn run_ask_scene(&mut self) {
+        if let Some(id) = self.active {
+            self.ask = None;
+            self.composer.text.clear();
+            self.composer.focus_requested = true;
+            self.start_ask(id, "print the word promptly-ok".into());
+        }
+    }
+
+    /// A command suggestion is still being written.
+    pub fn ask_pending(&self) -> bool {
+        self.ask
+            .as_ref()
+            .is_some_and(|a| matches!(a.status(), crate::ask::Status::Thinking))
+    }
+}
+
+#[cfg(test)]
 pub fn shot_scenes() -> Vec<Scene> {
     vec![
         ("02-repo-review", |a| {
@@ -4498,11 +4698,27 @@ pub fn shot_scenes() -> Vec<Scene> {
                 );
             }
         }),
+        ("14-ask-chip", |a| {
+            a.composer.text = "Install nvm using brew".into();
+            a.composer.focus_requested = true;
+        }),
+        ("15-ask-card", |a| {
+            a.composer.text.clear();
+            if let Some(id) = a.active {
+                a.start_ask(id, "Install nvm using brew".into());
+            }
+        }),
+        ("16-ask-danger", |a| {
+            if let Some(id) = a.active {
+                a.ask = None;
+                a.start_ask(id, "delete every node_modules folder under my home".into());
+            }
+        }),
     ]
 }
 
 /// Interface preferences changed from Settings, remembered between launches.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Prefs {
     show_thinking: bool,
@@ -4511,6 +4727,25 @@ struct Prefs {
     reduce_motion: bool,
     option_as_meta: bool,
     high_contrast: bool,
+    ai_commands: bool,
+    ai_output: bool,
+    ai_model: String,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            show_thinking: false,
+            show_claude_input: false,
+            thinking_open: false,
+            reduce_motion: false,
+            option_as_meta: false,
+            high_contrast: false,
+            ai_commands: true,
+            ai_output: true,
+            ai_model: "sonnet".into(),
+        }
+    }
 }
 
 impl Prefs {
@@ -4531,6 +4766,33 @@ impl Prefs {
             }
             let _ = promptly_core::util::write_private(&p, &b);
         }
+    }
+}
+
+/// Arguments that make the user's login shell exec `bin args...`, so PATH
+/// (nvm, ~/.local/bin) matches what they get in their own terminal.
+pub fn login_shell_exec(shell: &str, bin: String, args: Vec<String>) -> Vec<String> {
+    let sh_name = Path::new(shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if sh_name == "fish" {
+        let cmd = std::iter::once(bin)
+            .chain(args)
+            .map(|a| hooks::shell_quote(&a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        vec!["-l".into(), "-c".into(), format!("exec {cmd}")]
+    } else {
+        let mut v = vec![
+            "-l".into(),
+            "-i".into(),
+            "-c".into(),
+            r#"exec "$0" "$@""#.into(),
+            bin,
+        ];
+        v.extend(args);
+        v
     }
 }
 

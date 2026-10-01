@@ -11,6 +11,7 @@
 use egui::{CornerRadius, FontId, Rect, RichText, Sense, Stroke, pos2, vec2};
 use parking_lot::Mutex;
 use promptly_core::commands::{self, SlashItem};
+use promptly_core::nl_command::{self, Intent};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -72,6 +73,10 @@ pub enum ComposerAction {
         attachments: Vec<PathBuf>,
     },
     FocusTerminal,
+    /// Plain-English request in a shell pane: generate a command.
+    Ask {
+        request: String,
+    },
 }
 
 /// What the popup above the composer is completing.
@@ -108,6 +113,13 @@ pub struct Composer {
     clip: Arc<Mutex<Option<ClipImage>>>,
     clip_ignored: Option<u64>,
     pub notice: Option<String>,
+    /// Set by the app each frame: the target is a plain shell and
+    /// plain-English requests become commands.
+    pub shell_mode: bool,
+    /// Commands, builtins, aliases and functions the user's shell knows.
+    pub known_commands: Arc<std::collections::HashSet<String>>,
+    /// The user flipped Run/Ask for the current text.
+    intent_flip: bool,
 }
 
 pub fn edit_id() -> egui::Id {
@@ -115,6 +127,25 @@ pub fn edit_id() -> egui::Id {
 }
 
 impl Composer {
+    /// What Enter will do with the current text in a shell pane.
+    pub fn intent(&self) -> Intent {
+        let known = |w: &str| self.known_commands.contains(w);
+        let guess = nl_command::classify(&self.text, &known);
+        match (guess, self.intent_flip) {
+            (g, false) => g,
+            (Intent::Ask, true) => Intent::Command,
+            (Intent::Command, true) => Intent::Ask,
+        }
+    }
+
+    /// Put a command in the composer to edit; Enter will run it as typed.
+    pub fn set_command(&mut self, cmd: String) {
+        let known = |w: &str| self.known_commands.contains(w);
+        self.intent_flip = nl_command::classify(&cmd, &known) == Intent::Ask;
+        self.text = cmd;
+        self.focus_requested = true;
+    }
+
     pub fn load_history() -> Vec<String> {
         std::fs::read_to_string(history_path())
             .ok()
@@ -211,7 +242,12 @@ impl Composer {
         if self.dismissed_for.as_deref() == Some(self.text.as_str()) {
             return None;
         }
-        if let Some(q) = self.slash_query().map(str::to_owned) {
+        // In a shell, a leading `/` is a path, not a Claude command.
+        if let Some(q) = self
+            .slash_query()
+            .filter(|_| !self.shell_mode)
+            .map(str::to_owned)
+        {
             let items = self.slash_items(cwd, claude_dir);
             let m: Vec<SlashItem> = commands::filter(&items, &q)
                 .into_iter()
@@ -453,7 +489,9 @@ impl Composer {
                 }
                 ui.add_space(6.0);
             }
-            let hint = if self.attachments.is_empty() {
+            let hint = if self.shell_mode && self.attachments.is_empty() {
+                "Run a command, or describe what you want — \"install nvm using brew\"".to_string()
+            } else if self.attachments.is_empty() {
                 format!("Message {target}")
             } else {
                 "Add a message…".to_string()
@@ -478,6 +516,9 @@ impl Composer {
             }
             text_has_focus = resp.has_focus();
             if resp.changed() {
+                if self.text.trim().is_empty() {
+                    self.intent_flip = false;
+                }
                 self.dismissed_for = None;
                 self.popup_sel = 0;
             }
@@ -531,13 +572,23 @@ impl Composer {
                     }
                 });
                 ui.add_space(6.0);
-                ui.label(RichText::new("/").size(11.5).strong().color(t::TEXT_2))
-                    .on_hover_text("Commands and skills");
-                ui.label(RichText::new("commands").size(11.5).color(t::TEXT_3));
-                ui.add_space(8.0);
-                ui.label(RichText::new("@").size(11.5).strong().color(t::TEXT_2))
-                    .on_hover_text("Mention a file");
-                ui.label(RichText::new("files").size(11.5).color(t::TEXT_3));
+                if self.shell_mode {
+                    if self.text.trim().is_empty() {
+                        ui.label(RichText::new("#").size(11.5).strong().color(t::TEXT_2));
+                        ui.label(RichText::new("ask Claude").size(11.5).color(t::TEXT_3));
+                    } else if intent_chip(ui, self.intent()).clicked() {
+                        self.intent_flip = !self.intent_flip;
+                        self.focus_requested = true;
+                    }
+                } else {
+                    ui.label(RichText::new("/").size(11.5).strong().color(t::TEXT_2))
+                        .on_hover_text("Commands and skills");
+                    ui.label(RichText::new("commands").size(11.5).color(t::TEXT_3));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("@").size(11.5).strong().color(t::TEXT_2))
+                        .on_hover_text("Mention a file");
+                    ui.label(RichText::new("files").size(11.5).color(t::TEXT_3));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can_send = !self.text.trim().is_empty() || !self.attachments.is_empty();
                     if kit::send_button(ui, can_send).clicked() {
@@ -571,11 +622,25 @@ impl Composer {
                 self.save_history();
             }
             self.history_pos = None;
+            let ask = self.shell_mode && self.attachments.is_empty() && {
+                let known = |w: &str| self.known_commands.contains(w);
+                let guess = nl_command::classify(&text, &known);
+                (guess == Intent::Ask) != self.intent_flip
+            };
+            self.intent_flip = false;
             let attachments = std::mem::take(&mut self.attachments)
                 .into_iter()
                 .map(|a| a.path)
                 .collect();
-            action = Some(ComposerAction::Send { text, attachments });
+            action = Some(if ask {
+                let request = nl_command::strip_ask_prefix(&text)
+                    .unwrap_or(&text)
+                    .trim()
+                    .to_string();
+                ComposerAction::Ask { request }
+            } else {
+                ComposerAction::Send { text, attachments }
+            });
             self.focus_requested = true;
         }
         action
@@ -786,6 +851,42 @@ fn attachment_chip(ui: &mut egui::Ui, a: &Attachment) -> egui::Response {
         _ => "Click to remove",
     };
     resp.on_hover_text(format!("{}\n{hover}", a.path.display()))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Shows what Enter does in a shell pane; click to switch.
+fn intent_chip(ui: &mut egui::Ui, intent: Intent) -> egui::Response {
+    let (icon, label, col) = match intent {
+        Intent::Ask => (Icon::Sparkle, "Ask Claude for a command", t::ACCENT_HOVER),
+        Intent::Command => (Icon::Terminal, "Run in shell", t::TEXT_2),
+    };
+    let font = FontId::proportional(11.5);
+    let w = ui
+        .fonts_mut(|f| f.layout_no_wrap(label.into(), font.clone(), col))
+        .size()
+        .x
+        + 32.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
+    let h = kit::hover_t(ui, &resp);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(12),
+        kit::mix(col.gamma_multiply(0.10), col.gamma_multiply(0.18), h),
+    );
+    kit::paint_icon(
+        ui,
+        egui::Rect::from_center_size(pos2(rect.min.x + 14.0, rect.center().y), vec2(12.0, 12.0)),
+        icon,
+        col,
+    );
+    ui.painter().text(
+        pos2(rect.min.x + 25.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font,
+        col,
+    );
+    resp.on_hover_text("Click to switch. Start with # to always ask Claude.")
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
