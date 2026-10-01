@@ -313,6 +313,7 @@ pub struct App {
     /// Off by default: Promptly's composer replaces Claude Code's input box.
     show_claude_input: bool,
     update: Arc<Mutex<UpdateState>>,
+    recorder: Option<crate::record::Recorder>,
     paste_review: Option<(PaneId, String)>,
     restore: Option<SavedLayout>,
     index: Arc<Mutex<Option<SessionIndex>>>,
@@ -470,6 +471,7 @@ impl App {
             thinking_open: false,
             show_claude_input: false,
             update: Arc::new(Mutex::new(UpdateState::Idle)),
+            recorder: crate::record::Recorder::from_env(),
             paste_review: None,
             restore,
             index,
@@ -4284,6 +4286,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         use theme::tokens as t;
         let ctx = ui.ctx().clone();
+        if let Some(r) = self.recorder.as_mut() {
+            r.frame(&ctx);
+        }
         let overlay_open = self.palette.is_some()
             || self.history.is_some()
             || self.fanout.is_some()

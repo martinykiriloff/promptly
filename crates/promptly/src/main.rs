@@ -9,6 +9,7 @@ mod fonts;
 mod input;
 mod notify;
 mod pty;
+mod record;
 mod review;
 mod session;
 mod shell_integration;
