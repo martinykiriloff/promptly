@@ -4701,6 +4701,12 @@ impl eframe::App for App {
                             ),
                         }
                     };
+                    // ⌘V with an image on the clipboard attaches it, even from
+                    // the terminal.
+                    if self.composer.poll_image_paste(ui.ctx()) {
+                        self.composer.focus_requested = true;
+                        self.focus_terminal = false;
+                    }
                     self.composer.shell_mode = is_shell && self.ai_commands;
                     {
                         let c = self.core.lock();

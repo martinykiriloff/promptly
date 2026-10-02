@@ -127,6 +127,10 @@ pub struct Composer {
     pub known_commands: Arc<std::collections::HashSet<String>>,
     /// The user flipped Run/Ask for the current text.
     intent_flip: bool,
+    /// ⌘V was down last frame (fires the image paste once per press).
+    paste_latch: bool,
+    /// Long pastes shown as placeholders: (placeholder, full text).
+    pastes: Vec<(String, String)>,
 }
 
 pub fn edit_id() -> egui::Id {
@@ -330,6 +334,75 @@ impl Composer {
         });
     }
 
+    /// ⌘V with an image on the clipboard. egui only turns ⌘V into a paste
+    /// when the clipboard holds text, so a press without a text paste this
+    /// frame means "paste the image". Returns true when one was attached.
+    pub fn poll_image_paste(&mut self, ctx: &egui::Context) -> bool {
+        let (cmd, text_paste) = ctx.input(|i| {
+            (
+                i.modifiers.command,
+                i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+            )
+        });
+        if !self.image_paste_edge(cmd && keys::v_down(), text_paste) {
+            return false;
+        }
+        let has_image = arboard::Clipboard::new()
+            .and_then(|mut c| c.get_image())
+            .is_ok();
+        if has_image {
+            self.paste_clipboard_image();
+        }
+        has_image
+    }
+
+    /// True once per ⌘V press that egui didn't turn into a text paste.
+    fn image_paste_edge(&mut self, down: bool, text_paste: bool) -> bool {
+        let fire = down && !self.paste_latch && !text_paste;
+        self.paste_latch = down;
+        fire
+    }
+
+    /// Put a long paste in as a placeholder at the cursor, as Claude Code
+    /// does; the full text replaces it on send.
+    fn insert_paste(&mut self, ctx: &egui::Context, id: egui::Id, text: String) {
+        let chars = text.chars().count();
+        let mut label = format!("[Pasted {} characters text]", thousands(chars));
+        if !self.pastes.is_empty() {
+            label = format!(
+                "[Pasted {} characters text #{}]",
+                thousands(chars),
+                self.pastes.len() + 1
+            );
+        }
+        let len = self.text.chars().count();
+        let mut state = egui::TextEdit::load_state(ctx, id);
+        let (from, to) = state
+            .as_ref()
+            .and_then(|st| st.cursor.char_range())
+            .map(|r| {
+                let (a, b) = (r.primary.index.0, r.secondary.index.0);
+                (a.min(b).min(len), a.max(b).min(len))
+            })
+            .unwrap_or((len, len));
+        let byte = |i: usize| {
+            self.text
+                .char_indices()
+                .nth(i)
+                .map(|(b, _)| b)
+                .unwrap_or(self.text.len())
+        };
+        let (bf, bt) = (byte(from), byte(to));
+        self.text.replace_range(bf..bt, &label);
+        if let Some(st) = state.as_mut() {
+            let end = egui::text::CCursor::new(from + label.chars().count());
+            st.cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+            st.clone().store(ctx, id);
+        }
+        self.pastes.push((label, text));
+    }
+
     /// Save the clipboard image as a PNG under app data and attach it.
     fn paste_clipboard_image(&mut self) {
         let res = (|| -> Result<PathBuf, String> {
@@ -509,6 +582,22 @@ impl Composer {
             } else {
                 FontId::proportional(15.0)
             };
+            if focused && !self.shell_mode {
+                let big: Vec<String> = ui.input_mut(|i| {
+                    let mut out = vec![];
+                    i.events.retain(|e| match e {
+                        egui::Event::Paste(t) if is_long_paste(t) => {
+                            out.push(t.clone());
+                            false
+                        }
+                        _ => true,
+                    });
+                    out
+                });
+                for t in big {
+                    self.insert_paste(ui.ctx(), id, t);
+                }
+            }
             let edit = egui::TextEdit::multiline(&mut self.text)
                 .id(id)
                 .frame(egui::Frame::NONE)
@@ -531,6 +620,7 @@ impl Composer {
             if resp.changed() {
                 if self.text.trim().is_empty() {
                     self.intent_flip = false;
+                    self.pastes.clear();
                 }
                 self.dismissed_for = None;
                 self.popup_sel = 0;
@@ -639,7 +729,11 @@ impl Composer {
         }
         let send = send || card_resp.inner;
         if send && (!self.text.trim().is_empty() || !self.attachments.is_empty()) {
-            let text = std::mem::take(&mut self.text);
+            let mut text = std::mem::take(&mut self.text);
+            // Long pastes go out in full.
+            for (label, full) in self.pastes.drain(..) {
+                text = text.replacen(&label, &full, 1);
+            }
             if !text.trim().is_empty() {
                 self.history.retain(|h| h != &text);
                 self.history.push(text.clone());
@@ -917,6 +1011,43 @@ fn intent_chip(ui: &mut egui::Ui, intent: Intent) -> egui::Response {
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Pastes this long become a placeholder (Claude Code's behaviour).
+fn is_long_paste(t: &str) -> bool {
+    t.chars().count() > 500 || t.matches('\n').count() >= 2
+}
+
+/// 1234 -> "1,234".
+fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Whether the V key is physically down (macOS), for image paste.
+mod keys {
+    #[cfg(target_os = "macos")]
+    pub fn v_down() -> bool {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
+        }
+        // kCGEventSourceStateCombinedSessionState, kVK_ANSI_V.
+        // SAFETY: a pure query with no pointers.
+        unsafe { CGEventSourceKeyState(0, 0x09) }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn v_down() -> bool {
+        false
+    }
+}
+
 /// Small text button with a chevron that opens a menu.
 fn picker(ui: &mut egui::Ui, label: &str, tip: &str) -> egui::Response {
     let font = FontId::proportional(12.5);
@@ -1039,6 +1170,91 @@ fn history_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_paste_fires_once_per_press_without_text() {
+        let mut c = Composer::default();
+        assert!(c.image_paste_edge(true, false), "press with no text paste");
+        assert!(!c.image_paste_edge(true, false), "held: no repeat");
+        assert!(!c.image_paste_edge(false, false));
+        assert!(!c.image_paste_edge(true, true), "text paste wins");
+        assert!(!c.image_paste_edge(false, false));
+        assert!(c.image_paste_edge(true, false));
+        // Linking and calling the macOS key query works (V isn't held now).
+        let _ = keys::v_down();
+    }
+
+    #[test]
+    fn long_paste_becomes_placeholder_and_sends_in_full() {
+        use egui_kittest::Harness;
+        struct S {
+            c: Composer,
+            sent: Option<String>,
+            fonts: bool,
+        }
+        let long = "fn main() {\n    println!(\"hi\");\n}\n".repeat(30);
+        let snippets = std::collections::BTreeMap::new();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(800.0, 300.0))
+            .build_ui_state(
+                move |ui, st: &mut S| {
+                    // Fonts apply from the next frame: draw nothing until then.
+                    if !st.fonts {
+                        crate::fonts::install(ui.ctx());
+                        st.fonts = true;
+                        return;
+                    }
+                    if let Some(ComposerAction::Send { text, .. }) = st.c.show(
+                        ui,
+                        Path::new("/tmp"),
+                        Path::new("/tmp"),
+                        &snippets,
+                        "Claude",
+                    ) {
+                        st.sent = Some(text);
+                    }
+                },
+                S {
+                    c: Composer {
+                        claude_mode: true,
+                        focus_requested: true,
+                        text: "Look at this: ".into(),
+                        ..Default::default()
+                    },
+                    sent: None,
+                    fonts: false,
+                },
+            );
+        h.run();
+        h.input_mut().events.push(egui::Event::Paste(long.clone()));
+        h.run();
+        let label = format!(
+            "[Pasted {} characters text]",
+            thousands(long.chars().count())
+        );
+        assert_eq!(h.state().c.text, format!("Look at this: {label}"));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(
+            h.state().sent.as_deref(),
+            Some(format!("Look at this: {long}").as_str())
+        );
+        // Short pastes go in as typed.
+        h.input_mut().events.push(egui::Event::Paste("abc".into()));
+        h.run();
+        assert_eq!(h.state().c.text, "abc");
+    }
+
+    #[test]
+    fn long_pastes_collapse() {
+        assert!(!is_long_paste("short one-liner"));
+        assert!(!is_long_paste("two\nlines"));
+        assert!(is_long_paste("a\nb\nc"));
+        assert!(is_long_paste(&"x".repeat(501)));
+        assert_eq!(thousands(7), "7");
+        assert_eq!(thousands(1234), "1,234");
+        assert_eq!(thousands(1234567), "1,234,567");
+    }
 
     #[test]
     fn fuzzy_subsequence() {
