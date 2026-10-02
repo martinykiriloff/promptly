@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod nl_command;
 pub mod paths;
 pub mod sanitize;
+pub mod session_changes;
 pub mod state;
 pub mod statusline;
 pub mod transcript;

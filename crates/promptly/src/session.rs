@@ -10,6 +10,7 @@ use promptly_core::attention::{AttentionItem, AttentionQueue, NotifyPolicy};
 use promptly_core::git::Worktree;
 use promptly_core::hooks::HookEvent;
 use promptly_core::ipc::{Incoming, Server};
+use promptly_core::session_changes;
 use promptly_core::state::{SessionState, StateTracker, Transition};
 use promptly_core::statusline::StatusInfo;
 use promptly_core::transcript::{TranscriptReader, TranscriptStats, TranscriptWatch};
@@ -55,6 +56,8 @@ pub struct SessionMeta {
     pub pending_clipboard: Option<String>,
     /// Bumped whenever files may have changed, so the review pane refreshes.
     pub change_seq: u64,
+    /// Each file the agent edited, as it was before the first edit.
+    pub baselines: Arc<session_changes::Baselines>,
     /// Cumulative cost (USD) and tokens over time, for burn rates and sparklines.
     pub cost_series: promptly_core::usage::Series,
     pub token_series: promptly_core::usage::Series,
@@ -90,6 +93,7 @@ impl SessionMeta {
             clipboard_allowed: None,
             pending_clipboard: None,
             change_seq: 0,
+            baselines: Arc::default(),
             cost_series: promptly_core::usage::Series::with_cap(2000),
             token_series: promptly_core::usage::Series::with_cap(2000),
             steps: VecDeque::new(),
@@ -375,7 +379,22 @@ impl ClaudeLink {
         let core = lc.core.clone();
         let tx = lc.tx.clone();
         let ctx = lc.ctx.clone();
+        let seen = Mutex::new(std::collections::HashSet::<PathBuf>::new());
         let server = Server::spawn(socket, Some(token), move |msg| {
+            // Copy a file just before Claude first edits it, before taking the
+            // core lock: the hook client waits for this, so the copy is
+            // always of the file as it was.
+            let baseline = match &msg {
+                Incoming::Hook(v) => HookEvent::parse(v)
+                    .filter(|e| e.hook_event_name == "PreToolUse")
+                    .and_then(|e| session_changes::edited_path(&e))
+                    .filter(|p| seen.lock().insert(p.clone()))
+                    .map(|p| {
+                        let b = session_changes::capture(&p);
+                        (p, b)
+                    }),
+                _ => None,
+            };
             let note = {
                 let mut c = core.lock();
                 match msg {
@@ -391,6 +410,12 @@ impl ClaudeLink {
                         let Some(meta) = c.sessions.get_mut(&pane) else {
                             return;
                         };
+                        if let Some((path, base)) = baseline {
+                            Arc::make_mut(&mut meta.baselines)
+                                .entry(path)
+                                .or_insert(base);
+                            meta.change_seq += 1;
+                        }
                         // Claude reports its working directory with every hook.
                         if let Some(cwd) = ev.cwd.as_ref().filter(|c| c.is_dir())
                             && meta.cwd != *cwd

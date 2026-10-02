@@ -198,3 +198,74 @@ fn marketing() {
     h.state_mut().demo_view(false, false, true);
     shot(&mut h, "palette");
 }
+
+/// A real Claude session edits a file; the session's changes must show
+/// exactly that edit (the file's copy is taken before Claude writes).
+///   cargo test -p promptly session_changes_e2e -- --ignored --nocapture
+#[test]
+#[ignore]
+fn session_changes_e2e() {
+    use std::time::{Duration, Instant};
+    let dir = "/private/tmp/promptly-demo";
+    let file = std::path::Path::new(dir).join("main.rs");
+    let before = std::fs::read_to_string(&file).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    // SAFETY: test-only setup before any app threads start.
+    unsafe {
+        std::env::set_var("PROMPTLY_DATA_DIR", tmp.path().join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
+        for k in [
+            "PROMPTLY_CONTROL",
+            "PROMPTLY_SOCKET",
+            "PROMPTLY_TOKEN",
+            "PROMPTLY_SESSION",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .wgpu()
+        .build_eframe(|cc| App::new(cc));
+    let pump = |h: &mut Harness<'_, App>, secs: f32| {
+        let t0 = Instant::now();
+        while t0.elapsed().as_secs_f32() < secs {
+            h.step();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let id = h.state_mut().demo_claude(dir).expect("session");
+    let t0 = Instant::now();
+    while !h.state().demo_screen(id).contains("❯") && t0.elapsed() < Duration::from_secs(40) {
+        pump(&mut h, 0.5);
+    }
+    pump(&mut h, 1.5);
+    h.state_mut().demo_send(
+        id,
+        "Append exactly one line `// checked by Promptly` to the end of main.rs using your Edit tool. Change nothing else and don't run any commands.",
+    );
+    let t0 = Instant::now();
+    while !h.state().demo_working(id) && t0.elapsed() < Duration::from_secs(30) {
+        pump(&mut h, 0.3);
+    }
+    let mut seen_live = false;
+    let t0 = Instant::now();
+    while (h.state().demo_working(id) || !h.state().demo_settled(id))
+        && t0.elapsed() < Duration::from_secs(180)
+    {
+        pump(&mut h, 0.5);
+        if h.state().demo_working(id) && !h.state().demo_session_changes(id).is_empty() {
+            seen_live = true;
+        }
+    }
+    let changes = h.state().demo_session_changes(id);
+    let after = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, &before).unwrap();
+    println!("changes: {changes:?} (seen while working: {seen_live})");
+    assert!(
+        after.contains("checked by Promptly"),
+        "Claude didn't edit the file"
+    );
+    assert_eq!(changes, vec![("main.rs".to_string(), 1, 0)]);
+}

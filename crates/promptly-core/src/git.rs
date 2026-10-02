@@ -224,6 +224,9 @@ pub enum DiffScope {
     Branch,
     /// Only changes not yet committed.
     Uncommitted,
+    /// Files this session's agent edited, against their state before the
+    /// first edit. Works outside git repositories.
+    Session,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

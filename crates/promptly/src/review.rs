@@ -46,6 +46,10 @@ pub struct ReviewState {
     diff: Option<ReviewDiff>,
     error: Option<String>,
     pub scope: DiffScope,
+    /// The session's folder is inside a git repository (checked on change).
+    is_repo: bool,
+    /// Files the session's agent edited, as they were before (set by the app).
+    pub baselines: std::sync::Arc<promptly_core::session_changes::Baselines>,
     pub split: bool,
     viewed: HashSet<String>,
     collapsed: HashSet<String>,
@@ -106,6 +110,13 @@ impl ReviewState {
             self.collapsed.clear();
             self.selected = None;
             self.loaded = None;
+            // Outside a repository only the session's own edits can be shown.
+            self.is_repo = git::repo_root(dir).is_some();
+            if !self.is_repo {
+                self.scope = DiffScope::Session;
+            } else if self.scope == DiffScope::Session && self.baselines.is_empty() {
+                self.scope = DiffScope::Branch;
+            }
         }
         let stale = self.loaded_at.is_none_or(|t| t.elapsed() > AUTO_REFRESH);
         if (self.loaded != Some((seq, self.scope)) || stale) && !self.loading {
@@ -138,8 +149,14 @@ impl ReviewState {
         let slot = self.result.clone();
         let ctx = ctx.clone();
         let scope = self.scope;
+        let baselines = self.baselines.clone();
         std::thread::spawn(move || {
-            *slot.lock() = Some(git::review_diff(&dir, scope));
+            let r = if scope == DiffScope::Session {
+                promptly_core::session_changes::diff(&dir, &baselines)
+            } else {
+                git::review_diff(&dir, scope)
+            };
+            *slot.lock() = Some(r);
             ctx.request_repaint();
         });
     }
@@ -201,13 +218,25 @@ impl ReviewState {
         );
         h.label(RichText::new("Changes").size(14.0).color(t::TEXT));
         let mut scope = self.scope;
-        seg2(
-            &mut h,
-            ("seg-scope",),
-            &mut scope,
-            (DiffScope::Branch, "Branch"),
-            (DiffScope::Uncommitted, "Uncommitted"),
-        );
+        if self.is_repo {
+            seg(
+                &mut h,
+                ("seg-scope",),
+                &mut scope,
+                &[
+                    (DiffScope::Branch, "Branch"),
+                    (DiffScope::Uncommitted, "Uncommitted"),
+                    (DiffScope::Session, "This session"),
+                ],
+            );
+        } else {
+            seg(
+                &mut h,
+                ("seg-scope",),
+                &mut scope,
+                &[(DiffScope::Session, "This session")],
+            );
+        }
         if scope != self.scope {
             self.scope = scope;
             self.loaded = None;
@@ -305,6 +334,9 @@ impl ReviewState {
                             String::new()
                         }
                     ),
+                    (_, DiffScope::Session) => {
+                        "Edited by this session's agent, live as it works".to_string()
+                    }
                     _ if self.scope == DiffScope::Branch => format!(
                         "{}: no base branch, showing uncommitted changes",
                         d.branch.clone().unwrap_or_default()
@@ -344,15 +376,21 @@ impl ReviewState {
         );
 
         if d.files.is_empty() {
-            empty_state(
-                ui,
-                "No changes",
-                if d.scope == DiffScope::Branch {
-                    "This branch matches its base and has nothing uncommitted."
-                } else {
-                    "Nothing uncommitted. Switch to Branch to see committed work."
-                },
-            );
+            let (title, body) = match d.scope {
+                DiffScope::Session => (
+                    "No edits yet",
+                    "Files Claude edits in this session appear here as it works, in any folder. Changes made by shell commands show under Uncommitted in a git repository.",
+                ),
+                DiffScope::Branch => (
+                    "No changes",
+                    "This branch matches its base and has nothing uncommitted.",
+                ),
+                DiffScope::Uncommitted => (
+                    "No changes",
+                    "Nothing uncommitted. Switch to Branch to see committed work.",
+                ),
+            };
+            empty_state(ui, title, body);
             return action;
         }
 
@@ -1365,18 +1403,37 @@ fn seg2<T: PartialEq + Copy>(
     a: (T, &str),
     b: (T, &str),
 ) {
+    seg(ui, id, value, &[a, b]);
+}
+
+/// Segmented control.
+fn seg<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    value: &mut T,
+    opts: &[(T, &str)],
+) {
     let font = FontId::proportional(12.0);
-    let wa = ui.fonts_mut(|f| f.layout_no_wrap(a.1.into(), font.clone(), t::TEXT).size().x) + 24.0;
-    let wb = ui.fonts_mut(|f| f.layout_no_wrap(b.1.into(), font.clone(), t::TEXT).size().x) + 24.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(wa + wb + 4.0, 26.0), Sense::hover());
+    let widths: Vec<f32> = opts
+        .iter()
+        .map(|(_, l)| {
+            ui.fonts_mut(|f| {
+                f.layout_no_wrap((*l).into(), font.clone(), t::TEXT)
+                    .size()
+                    .x
+            }) + 24.0
+        })
+        .collect();
+    let total: f32 = widths.iter().sum::<f32>() + 4.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(total, 26.0), Sense::hover());
     ui.painter()
         .rect_filled(rect, CornerRadius::same(7), t::BG_MAIN);
     let base = ui.id().with(id);
     let mut x = rect.min.x + 2.0;
-    for (opt, label, w) in [(a.0, a.1, wa), (b.0, b.1, wb)] {
+    for ((opt, label), w) in opts.iter().zip(widths) {
         let r = Rect::from_min_size(pos2(x, rect.min.y + 2.0), vec2(w, rect.height() - 4.0));
-        let resp = ui.interact(r, base.with(label), Sense::click());
-        let on = *value == opt;
+        let resp = ui.interact(r, base.with(*label), Sense::click());
+        let on = *value == *opt;
         if on {
             ui.painter()
                 .rect_filled(r, CornerRadius::same(5), t::ACTIVE);
@@ -1389,7 +1446,7 @@ fn seg2<T: PartialEq + Copy>(
         ui.painter().text(
             r.center(),
             egui::Align2::CENTER_CENTER,
-            label,
+            *label,
             font.clone(),
             col,
         );
@@ -1397,7 +1454,7 @@ fn seg2<T: PartialEq + Copy>(
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
         {
-            *value = opt;
+            *value = *opt;
         }
         x += w;
     }

@@ -2317,15 +2317,16 @@ impl App {
                 .lock()
                 .sessions
                 .get(&id)
-                .map(|m| (m.cwd.clone(), m.change_seq))
+                .map(|m| (m.cwd.clone(), m.change_seq, m.baselines.clone()))
         });
-        let Some((cwd, seq)) = target else {
+        let Some((cwd, seq, baselines)) = target else {
             ui.add_space(48.0);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("No session selected").color(theme::tokens::TEXT_3));
             });
             return;
         };
+        self.review.baselines = baselines;
         self.review.sync(&cwd, seq, ctx);
         match self.review.show(ui, full) {
             Some(ReviewAction::OpenInEditor(path, line)) => self.open_in_editor(&path, line),
@@ -4915,6 +4916,25 @@ impl App {
     /// Send a message the way the composer does.
     pub fn demo_send(&mut self, id: PaneId, text: &str) {
         self.send_message(id, text, &[]);
+    }
+
+    /// The session's own edits: (path, added, removed) per file.
+    pub fn demo_session_changes(&self, id: PaneId) -> Vec<(String, u32, u32)> {
+        let (cwd, base) = {
+            let c = self.core.lock();
+            let Some(m) = c.sessions.get(&id) else {
+                return vec![];
+            };
+            (m.cwd.clone(), m.baselines.clone())
+        };
+        promptly_core::session_changes::diff(&cwd, &base)
+            .map(|d| {
+                d.files
+                    .into_iter()
+                    .map(|f| (f.path, f.added, f.removed))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Claude is working on a turn.

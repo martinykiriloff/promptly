@@ -11,6 +11,8 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 const HOOK_BUDGET: Duration = Duration::from_millis(15);
+/// Longer for pre-edit hooks: Promptly reads the file before replying.
+const EDIT_HOOK_BUDGET: Duration = Duration::from_millis(750);
 const MAX_STDIN: u64 = 4 * 1024 * 1024;
 
 const USAGE: &str = "\
@@ -91,7 +93,22 @@ fn hook() {
     let Ok(payload) = serde_json::from_slice(&input) else {
         return;
     };
-    let _ = ipc::send_oneshot(&sock, &Envelope::Hook { token, payload }, HOOK_BUDGET);
+    // Before a file edit Promptly copies the file as it was; give it time,
+    // so the copy is always taken before Claude writes.
+    let budget = if is_pre_edit(&payload) {
+        EDIT_HOOK_BUDGET
+    } else {
+        HOOK_BUDGET
+    };
+    let _ = ipc::send_oneshot(&sock, &Envelope::Hook { token, payload }, budget);
+}
+
+fn is_pre_edit(payload: &serde_json::Value) -> bool {
+    payload["hook_event_name"] == "PreToolUse"
+        && matches!(
+            payload["tool_name"].as_str(),
+            Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit")
+        )
 }
 
 /// Forward status line input, then chain to the user's own status line
