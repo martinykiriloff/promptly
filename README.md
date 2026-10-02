@@ -9,7 +9,7 @@
 Run several Claude Code sessions side by side and know the moment one needs you.
 See your plan usage live. Review what changed without leaving the window.
 
-**[promptly website](https://martinykiriloff.github.io/promptly/)** · [FSL-1.1-MIT license](LICENSE.md) · [Latest release](https://github.com/martinykiriloff/promptly/releases/latest) · macOS (Apple silicon) and Linux
+**[promptly website](https://martinykiriloff.github.io/promptly/)** · [MIT license](LICENSE.md) · [Latest release](https://github.com/martinykiriloff/promptly/releases/latest) · macOS (Apple silicon) and Linux
 
 ![Promptly main window: sessions on the left, Claude Code in the middle, review pane on the right](docs/screenshots/main.png)
 
@@ -398,14 +398,14 @@ Next:
 
 ## License
 
-Promptly is released under the **[Functional Source License 1.1, MIT future license (FSL-1.1-MIT)](LICENSE.md)**.
+Promptly is released under the **[MIT License](LICENSE.md)**.
 
-- **You can** use it for anything (personal or at work), read the code, modify it, and share it.
-- **You can't** use it to build or sell a competing product.
-- **Each version becomes MIT** two years after it's released, with no strings attached.
+Use it for anything, personal or commercial. Read it, change it, redistribute it, build on it.
+The only condition is that the copyright and license notice stay with the code.
 
-It's the same model Sentry uses: open enough to trust and contribute to, while keeping
-the project sustainable.
+Versions released before the switch to MIT were published under the Functional Source
+License 1.1. The copyright holder has relicensed the project, so the current source and all
+future releases are MIT.
 
 ---
 
