@@ -89,19 +89,6 @@ enum Action {
 
 const ACTIONS: &[(Action, &str, &str, &str)] = &[
     (
-        Action::SwitchAccount,
-        "switch_account",
-        "Switch Claude account",
-        "primary+shift+a",
-    ),
-    (Action::AddAccount, "add_account", "Add Claude account", ""),
-    (
-        Action::AskCommand,
-        "ask_command",
-        "Ask Claude for a shell command",
-        "primary+i",
-    ),
-    (
         Action::Palette,
         "palette",
         "Command palette",
@@ -244,6 +231,19 @@ const ACTIONS: &[(Action, &str, &str, &str)] = &[
         "install_update",
         "Install available update",
         "",
+    ),
+    (
+        Action::SwitchAccount,
+        "switch_account",
+        "Switch Claude account",
+        "primary+shift+a",
+    ),
+    (Action::AddAccount, "add_account", "Add Claude account", ""),
+    (
+        Action::AskCommand,
+        "ask_command",
+        "Ask Claude for a shell command",
+        "primary+i",
     ),
 ];
 
@@ -2945,57 +2945,15 @@ impl App {
                 [rect.left_bottom(), rect.right_bottom()],
                 egui::Stroke::new(1.0, theme::tokens::BORDER),
             );
-            let mut hui = ui.new_child(
+            // Right-hand controls get their space first; the title side is
+            // clipped to what is left, so narrow panes never overlap.
+            let full = rect.shrink2(egui::vec2(16.0, 0.0));
+            let mut rui = ui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(rect.shrink2(egui::vec2(16.0, 0.0)))
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    .max_rect(full)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
             );
-            let ui = &mut hui;
-            ui.spacing_mut().item_spacing.x = 10.0;
-            let st = m.state();
-            if m.is_claude() {
-                kit::state_pill(ui, kit::state_label(st), theme::state_color(st));
-            } else {
-                let (label, col) = match (m.command_running, m.last_exit) {
-                    (true, _) => ("Running".to_string(), theme::BLUE),
-                    (false, Some(c)) if c != 0 => (format!("Exit {c}"), theme::RED),
-                    _ => ("Shell".to_string(), theme::MUTED),
-                };
-                kit::state_pill(ui, &label, col);
-            }
-            let title_col = if is_active {
-                theme::tokens::TEXT
-            } else {
-                theme::tokens::TEXT_2
-            };
-            ui.label(RichText::new(m.display_name()).size(13.0).color(title_col))
-                .on_hover_text(m.cwd.to_string_lossy());
-            if let Some(tag) = c.account_tag(&m.account) {
-                let label = c.account(&m.account).map(|a| a.label()).unwrap_or_default();
-                kit::dot_label(
-                    ui,
-                    &tag,
-                    kit::avatar_color(c.account_index(&m.account)),
-                    theme::tokens::TEXT_3,
-                )
-                .on_hover_text(format!("Claude account: {label}"));
-            }
-            if let Some(b) = &m.branch {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                kit::paint_icon(ui, r, Icon::Branch, theme::tokens::TEXT_3);
-                ui.add_space(-6.0);
-                ui.label(
-                    RichText::new(b)
-                        .font(FontId::monospace(11.5))
-                        .color(theme::tokens::TEXT_3),
-                );
-            }
-            if m.is_claude() && !m.hooks_injected {
-                kit::dot_label(ui, "transcript-only", theme::AMBER, theme::tokens::TEXT_3)
-                    .on_hover_text("Hooks are not injected; state is derived from the transcript.");
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            (|ui: &mut egui::Ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if kit::icon_button(ui, Icon::PanelRight, "Review changes", self.review_open)
                     .clicked()
@@ -3055,7 +3013,59 @@ impl App {
                     .unwrap_or_else(|| m.started.elapsed());
                 ui.label(RichText::new(fmt_dur(elapsed)).size(12.5).color(muted))
                     .on_hover_text("Current or last turn");
-            });
+            })(&mut rui);
+            let right_w = rui.min_rect().width();
+            let left_rect = full.with_max_x((full.max.x - right_w - 16.0).max(full.min.x));
+            let mut hui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(left_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            hui.set_clip_rect(left_rect.intersect(ui.clip_rect()));
+            let ui = &mut hui;
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let st = m.state();
+            if m.is_claude() {
+                kit::state_pill(ui, kit::state_label(st), theme::state_color(st));
+            } else {
+                let (label, col) = match (m.command_running, m.last_exit) {
+                    (true, _) => ("Running".to_string(), theme::BLUE),
+                    (false, Some(c)) if c != 0 => (format!("Exit {c}"), theme::RED),
+                    _ => ("Shell".to_string(), theme::MUTED),
+                };
+                kit::state_pill(ui, &label, col);
+            }
+            let title_col = if is_active {
+                theme::tokens::TEXT
+            } else {
+                theme::tokens::TEXT_2
+            };
+            ui.label(RichText::new(m.display_name()).size(13.0).color(title_col))
+                .on_hover_text(m.cwd.to_string_lossy());
+            if let Some(tag) = c.account_tag(&m.account) {
+                let label = c.account(&m.account).map(|a| a.label()).unwrap_or_default();
+                kit::dot_label(
+                    ui,
+                    &tag,
+                    kit::avatar_color(c.account_index(&m.account)),
+                    theme::tokens::TEXT_3,
+                )
+                .on_hover_text(format!("Claude account: {label}"));
+            }
+            if let Some(b) = &m.branch {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                kit::paint_icon(ui, r, Icon::Branch, theme::tokens::TEXT_3);
+                ui.add_space(-6.0);
+                ui.label(
+                    RichText::new(b)
+                        .font(FontId::monospace(11.5))
+                        .color(theme::tokens::TEXT_3),
+                );
+            }
+            if m.is_claude() && !m.hooks_injected {
+                kit::dot_label(ui, "transcript-only", theme::AMBER, theme::tokens::TEXT_3)
+                    .on_hover_text("Hooks are not injected; state is derived from the transcript.");
+            }
         }
         // Callouts under the header.
         let c = self.core.lock();
@@ -4878,6 +4888,65 @@ pub type Scene = (&'static str, fn(&mut App));
 
 #[cfg(test)]
 impl App {
+    /// Marketing renders: start a real Claude session in `cwd`.
+    pub fn demo_claude(&mut self, cwd: &str) -> Option<PaneId> {
+        self.spawn(NewSession {
+            cwd: Some(cwd.into()),
+            claude: true,
+            ..Default::default()
+        })
+    }
+
+    /// Visible text of a pane (marketing renders).
+    pub fn demo_screen(&self, id: PaneId) -> String {
+        self.panes
+            .get(&id)
+            .map(|e| term_view::screen_text(&e.pane, 200).join("\n"))
+            .unwrap_or_default()
+    }
+
+    /// Type raw bytes into a pane.
+    pub fn demo_type(&self, id: PaneId, bytes: &[u8]) {
+        if let Some(e) = self.panes.get(&id) {
+            e.pane.write(bytes.to_vec());
+        }
+    }
+
+    /// Send a message the way the composer does.
+    pub fn demo_send(&mut self, id: PaneId, text: &str) {
+        self.send_message(id, text, &[]);
+    }
+
+    /// Claude is working on a turn.
+    pub fn demo_working(&self, id: PaneId) -> bool {
+        self.core
+            .lock()
+            .sessions
+            .get(&id)
+            .is_some_and(|m| m.state() == SessionState::Working)
+    }
+
+    /// The session finished a turn and reported its cost.
+    pub fn demo_settled(&self, id: PaneId) -> bool {
+        self.core.lock().sessions.get(&id).is_some_and(|m| {
+            m.status.cost_usd.is_some()
+                && matches!(
+                    m.state(),
+                    SessionState::Idle | SessionState::Done | SessionState::WaitingInput
+                )
+        })
+    }
+
+    pub fn demo_view(&mut self, review: bool, usage: bool, palette: bool) {
+        self.review_open = review;
+        self.review_full = false;
+        self.usage_mode = usage;
+        self.palette = None;
+        if palette {
+            self.run(Action::Palette);
+        }
+    }
+
     /// Ask for a harmless command (the Enter-runs-it check).
     pub fn run_ask_scene(&mut self) {
         if let Some(id) = self.active {

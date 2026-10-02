@@ -64,14 +64,15 @@ Promptly reads that structure for you:
 Claude Code reports your plan's rate limits to its status line. Promptly turns them
 into a live view:
 
-- **5-hour and weekly limit meters**, always in the sidebar, with reset countdowns
-  ticking down to the second.
-- **Spend and burn rate** across open sessions (`$1.24 · $3.10/h`), with numbers that
-  animate as they change and a "live" indicator while tokens are flowing.
+- **5-hour and weekly limit meters**, always in the status bar along the bottom of
+  the window, next to the active session's context and cost.
+- **Spend and burn rate** across the account's open sessions (`$1.24 · $3.10/h`),
+  with numbers that animate as they change and a "live" indicator while tokens are
+  flowing.
 - **The usage dashboard (⌘U):**
-  - limit history sparklines
-  - today's tokens across *every* Claude Code session on the machine, including ones
-    started outside Promptly, deduplicated per request
+  - reset countdowns ticking down to the second, and limit history sparklines
+  - today's tokens across *every* Claude Code session of the account in use,
+    including ones started outside Promptly, deduplicated per request
   - tokens by hour and per model
   - a per-session table with cost, tokens, burn rate, context %, lines changed and a
     one-hour spend sparkline
@@ -168,8 +169,8 @@ Promptly updates itself from this repository's
 
 1. It checks for a newer release at launch and every 6 hours. You can also run
    **Check for updates** from the command palette or **Settings › Updates**.
-2. When one exists, an **Update available** card appears in the sidebar. Click
-   **Update**.
+2. When one exists, an **Update available** card appears in the sidebar, and
+   **Settings › Updates** shows **Update to vX** next to **Check now**. Click either.
 3. Promptly downloads the build for your platform and verifies its SHA-256 against
    the release's `SHA256SUMS`. It won't install a build without a matching checksum.
 4. It replaces `Promptly.app` (or the `promptly` and `promptly-ctl` binaries from the

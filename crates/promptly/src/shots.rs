@@ -83,3 +83,118 @@ fn shots() {
     }
     render(&mut h, &dir, "13-account-switcher");
 }
+
+/// Marketing screenshots for the README and the website, from a real Claude
+/// Code session. Opt-in (uses your Claude login and a little of your plan):
+///   PROMPTLY_SHOTS=/tmp/m cargo test -p promptly marketing -- --ignored --nocapture
+/// Needs `promptly-ctl` next to the test binary for live usage.
+#[test]
+#[ignore]
+fn marketing() {
+    use std::time::{Duration, Instant};
+    let dir = std::path::PathBuf::from(
+        std::env::var("PROMPTLY_SHOTS").unwrap_or_else(|_| "/tmp/promptly-marketing".into()),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    // Real plan-limit history so the dashboard has a trend.
+    let real = promptly_core::paths::data_dir();
+    for f in std::fs::read_dir(&real).into_iter().flatten().flatten() {
+        let n = f.file_name().to_string_lossy().to_string();
+        if n.starts_with("usage") && n.ends_with(".json") {
+            let _ = std::fs::copy(f.path(), data.join(&n));
+        }
+    }
+    // Show a display name instead of an email in public images.
+    let home = promptly_core::paths::home().join(".claude");
+    let accounts = serde_json::json!({
+        "names": { home.to_string_lossy(): "Martin" },
+        "active": home.to_string_lossy(),
+    });
+    std::fs::write(data.join("accounts.json"), accounts.to_string()).unwrap();
+    // SAFETY: test-only setup before any app threads start.
+    unsafe {
+        std::env::set_var("PROMPTLY_DATA_DIR", &data);
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
+        for k in [
+            "PROMPTLY_CONTROL",
+            "PROMPTLY_SOCKET",
+            "PROMPTLY_TOKEN",
+            "PROMPTLY_SESSION",
+            "PROMPTLY_FAKE_VERSION",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_eframe(|cc| App::new(cc));
+    // Render shortcuts as on a Mac (⌘), where these screenshots are used.
+    h.ctx.set_os(egui::os::OperatingSystem::Mac);
+    let pump = |h: &mut Harness<'_, App>, secs: f32| {
+        let t0 = Instant::now();
+        while t0.elapsed().as_secs_f32() < secs {
+            h.step();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    pump(&mut h, 1.0);
+    let id = h
+        .state_mut()
+        .demo_claude("/private/tmp/prdemo2")
+        .expect("claude session");
+    // Wait for Claude's prompt; accept the one-time folder trust question.
+    let t0 = Instant::now();
+    let mut trusted = false;
+    loop {
+        pump(&mut h, 0.5);
+        let screen = h.state().demo_screen(id);
+        if !trusted && screen.contains("trust this folder") {
+            // The default answer is "No, exit": move to "Yes" first.
+            h.state().demo_type(id, b"\x1b[B");
+            pump(&mut h, 0.4);
+            h.state().demo_type(id, b"\r");
+            trusted = true;
+            pump(&mut h, 2.0);
+            continue;
+        }
+        if screen.contains("❯") || t0.elapsed() > Duration::from_secs(40) {
+            break;
+        }
+    }
+    pump(&mut h, 1.5);
+    h.state_mut().demo_send(
+        id,
+        "Read src/middleware/rate-limit.ts and tell me in two short sentences what it does and one risk you see.",
+    );
+    // Wait for the turn to start, then to finish.
+    let t0 = Instant::now();
+    while !h.state().demo_working(id) && t0.elapsed() < Duration::from_secs(30) {
+        pump(&mut h, 0.3);
+    }
+    let t0 = Instant::now();
+    while (h.state().demo_working(id) || !h.state().demo_settled(id))
+        && t0.elapsed() < Duration::from_secs(180)
+    {
+        pump(&mut h, 0.5);
+    }
+    pump(&mut h, 2.0);
+    let shot = |h: &mut Harness<'_, App>, name: &str| {
+        pump(h, 1.2);
+        let img = h.render().expect("render");
+        let path = dir.join(format!("{name}.png"));
+        img.save(&path).expect("save png");
+        println!("wrote {}", path.display());
+    };
+    h.state_mut().demo_view(true, false, false);
+    shot(&mut h, "main");
+    h.state_mut().demo_view(false, true, false);
+    shot(&mut h, "usage");
+    h.state_mut().demo_view(false, false, true);
+    shot(&mut h, "palette");
+}
