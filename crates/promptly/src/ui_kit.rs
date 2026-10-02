@@ -604,6 +604,64 @@ pub fn avatar_color(index: usize) -> Color32 {
     PALETTE[index % PALETTE.len()]
 }
 
+/// Account group header in the session list: colour dot, name, count;
+/// "In use" on the active account, "Switch" on hover for the others.
+pub fn account_header(
+    ui: &mut Ui,
+    label: &str,
+    count: usize,
+    index: usize,
+    in_use: bool,
+) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+    let h = if in_use { 0.0 } else { hover_t(ui, &resp) };
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(6),
+        mix(Color32::TRANSPARENT, t::HOVER, h),
+    );
+    let c = avatar_color(index);
+    ui.painter()
+        .circle_filled(pos2(rect.min.x + 14.0, rect.center().y), 4.0, c);
+    let name = ui.painter().text(
+        pos2(rect.min.x + 26.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.0),
+        mix(t::TEXT_2, t::TEXT, h),
+    );
+    ui.painter().text(
+        pos2(name.max.x + 7.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        count.to_string(),
+        FontId::proportional(11.5),
+        t::TEXT_3,
+    );
+    let right = pos2(rect.max.x - 10.0, rect.center().y);
+    if in_use {
+        ui.painter().text(
+            right,
+            Align2::RIGHT_CENTER,
+            "In use",
+            FontId::proportional(11.0),
+            c,
+        );
+    } else if h > 0.01 {
+        ui.painter().text(
+            right,
+            Align2::RIGHT_CENTER,
+            "Switch",
+            FontId::proportional(11.0),
+            t::TEXT_2.gamma_multiply(h),
+        );
+    }
+    if in_use {
+        resp
+    } else {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    }
+}
+
 /// Round initial avatar.
 pub fn paint_avatar(ui: &Ui, center: egui::Pos2, radius: f32, initial: char, index: usize) {
     let c = avatar_color(index);

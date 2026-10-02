@@ -774,6 +774,20 @@ impl App {
         }
     }
 
+    /// Focus a session the user picked; the account at the top follows it.
+    fn open_session(&mut self, id: PaneId) {
+        self.focus(id);
+        let account = self
+            .core
+            .lock()
+            .sessions
+            .get(&id)
+            .map(|m| m.account.clone());
+        if let Some(a) = account {
+            self.switch_account(&a);
+        }
+    }
+
     fn close(&mut self, id: PaneId) {
         self.panes.remove(&id);
         let meta = {
@@ -906,7 +920,7 @@ impl App {
                 }
                 AppEvent::Control(req, resp) => self.on_control(req, resp),
                 AppEvent::FocusSession(id) => {
-                    self.focus(id);
+                    self.open_session(id);
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 AppEvent::Input(id, bytes) => {
@@ -1142,7 +1156,7 @@ impl App {
                     .first()
                     .map(|i| i.session);
                 match next {
-                    Some(id) => self.focus(id),
+                    Some(id) => self.open_session(id),
                     None => self.toast("No session needs you"),
                 }
             }
@@ -1210,7 +1224,7 @@ impl App {
                     } else {
                         (i + n - 1) % n
                     };
-                    self.focus(order[j]);
+                    self.open_session(order[j]);
                 }
             }
             Action::FontUp => self.font_size = (self.font_size + 1.0).min(32.0),
@@ -1535,18 +1549,21 @@ impl App {
     }
 
     fn switch_account(&mut self, id: &str) {
-        let label = {
+        let (label, email) = {
             let mut c = self.core.lock();
             if c.active_account == id {
                 return;
             }
             c.set_active(id);
             c.daily = None;
-            c.active().label()
+            let a = c.active();
+            (a.short_label(), a.label())
         };
-        self.toast(format!(
-            "New sessions use {label}. Running sessions keep their account."
-        ));
+        self.toast(if label == email {
+            format!("Switched to {label}. New sessions use this account.")
+        } else {
+            format!("Switched to {label} ({email}). New sessions use this account.")
+        });
     }
 
     /// Account picker at the top of the sidebar.
@@ -1901,14 +1918,75 @@ impl App {
             .unwrap_or(170.0);
         let footer_h = card_h + 52.0;
         let list_h = (ui.available_height() - footer_h).max(60.0);
+        // Sessions in tab order, grouped under their account when there is
+        // more than one account.
+        let order: Vec<(usize, PaneId)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .flat_map(|(ti, t)| t.panes.iter().map(move |id| (ti, *id)))
+            .filter(|(_, id)| c.sessions.contains_key(id))
+            .collect();
+        type Group = (
+            Option<(usize, promptly_core::accounts::Account)>,
+            Vec<(usize, PaneId)>,
+        );
+        let groups: Vec<Group> = if c.multi_account() {
+            let mut gs: Vec<Group> = c
+                .accounts
+                .iter()
+                .enumerate()
+                .map(|(ai, a)| {
+                    let rows = order
+                        .iter()
+                        .copied()
+                        .filter(|(_, id)| c.sessions[id].account == a.id)
+                        .collect();
+                    (Some((ai, a.clone())), rows)
+                })
+                .filter(|(_, rows): &Group| !rows.is_empty())
+                .collect();
+            let orphans: Vec<_> = order
+                .iter()
+                .copied()
+                .filter(|(_, id)| c.account(&c.sessions[id].account).is_none())
+                .collect();
+            if !orphans.is_empty() {
+                gs.push((None, orphans));
+            }
+            gs
+        } else {
+            vec![(None, order)]
+        };
+        let active_account = c.active_account.clone();
+        let mut switch_to = None;
         egui::ScrollArea::vertical()
             .id_salt("sessions")
             .max_height(list_h)
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                for (ti, tab) in self.tabs.iter().enumerate() {
-                    for id in &tab.panes {
+                for (gi, (header, rows)) in groups.iter().enumerate() {
+                    if let Some((ai, acct)) = header {
+                        if gi > 0 {
+                            ui.add_space(6.0);
+                        }
+                        let in_use = acct.id == active_account;
+                        if kit::account_header(ui, &acct.short_label(), rows.len(), *ai, in_use)
+                            .on_hover_text(if in_use {
+                                format!("{}: new sessions use this account", acct.label())
+                            } else {
+                                format!("Switch to {}", acct.label())
+                            })
+                            .clicked()
+                            && !in_use
+                        {
+                            switch_to = Some(acct.id.clone());
+                        }
+                    }
+                    for &(ti, pane) in rows {
+                        let tab = &self.tabs[ti];
+                        let id = &pane;
                         let Some(m) = c.sessions.get(id) else {
                             continue;
                         };
@@ -1950,10 +2028,6 @@ impl App {
                                 _ => "Shell".to_string(),
                             };
                             (format!("{s} · {place}"), None)
-                        };
-                        let subtitle = match c.account_tag(&m.account) {
-                            Some(tag) => format!("{subtitle} · {tag}"),
-                            None => subtitle,
                         };
                         let subtitle = if m.muted {
                             format!("{subtitle} · muted")
@@ -2010,6 +2084,9 @@ impl App {
                 }
             });
         drop(c);
+        if let Some(id) = switch_to {
+            self.switch_account(&id);
+        }
 
         // Footer: live usage card above the view toggles.
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
@@ -2061,7 +2138,7 @@ impl App {
             m.priority = (m.priority + d).clamp(-3, 3);
         }
         if let Some(id) = focus {
-            self.focus(id);
+            self.open_session(id);
         }
         if let Some(id) = close {
             self.close(id);
@@ -2732,7 +2809,7 @@ impl App {
             });
         });
         if let Some(id) = focus {
-            self.focus(id);
+            self.open_session(id);
         }
     }
 
@@ -3256,7 +3333,7 @@ impl App {
             }
         });
         if let Some(id) = focus {
-            self.focus(id);
+            self.open_session(id);
         }
     }
 
@@ -4717,6 +4794,19 @@ pub fn shot_scenes() -> Vec<Scene> {
             if let Some(id) = a.active {
                 a.ask = None;
                 a.start_ask(id, "delete every node_modules folder under my home".into());
+            }
+        }),
+        ("17-open-other-account", |a| {
+            a.ask = None;
+            let other = {
+                let c = a.core.lock();
+                c.sessions
+                    .iter()
+                    .find(|(_, m)| m.account != c.active_account)
+                    .map(|(id, _)| *id)
+            };
+            if let Some(id) = other {
+                a.open_session(id);
             }
         }),
     ]
