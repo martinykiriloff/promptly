@@ -19,4 +19,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./site
           force_orphan: true
+          # force_orphan replaces the branch, so the custom domain must be
+          # written on every publish or GitHub Pages forgets it.
+          cname: promptly-cli.com
           commit_message: "Publish site"
