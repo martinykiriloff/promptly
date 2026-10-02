@@ -3,8 +3,8 @@
 //! status colors only for limit levels and always paired with a label.
 
 use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
-use promptly_core::statusline::LimitWindow;
-use promptly_core::usage::{fmt_tokens, fmt_until};
+
+use promptly_core::usage::fmt_tokens;
 
 use crate::theme::{self, tokens as t};
 
@@ -44,46 +44,6 @@ pub fn limit_bar(ui: &mut Ui, frac: f32, color: Color32, width: f32) {
     let mut fill = rect;
     fill.set_width((rect.width() * frac.clamp(0.0, 1.0)).max(if frac > 0.0 { 6.0 } else { 0.0 }));
     ui.painter().rect_filled(fill, CornerRadius::same(3), color);
-}
-
-/// Compact limit row for the sidebar: "5-hour  42%  ▬▬▬───  resets 2h 14m".
-pub fn limit_row(ui: &mut Ui, label: &str, w: Option<LimitWindow>, now: i64, reduce_motion: bool) {
-    let width = ui.available_width();
-    match w {
-        None => {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(label).size(12.0).color(t::TEXT_2));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new("—").size(11.0).color(t::TEXT_3));
-                });
-            });
-            limit_bar(ui, 0.0, t::BORDER, width);
-        }
-        Some(w) => {
-            let pct = tween(ui, ("limit", label), w.used_percentage, reduce_motion);
-            let (level, color) = limit_level(w.used_percentage);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(label).size(12.0).color(t::TEXT_2));
-                ui.label(
-                    egui::RichText::new(format!("{pct:.0}%"))
-                        .size(12.0)
-                        .color(t::TEXT),
-                );
-                if level != "OK" {
-                    ui.label(egui::RichText::new(level).size(11.0).color(color));
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("resets {}", fmt_until(w.resets_at - now)))
-                            .size(11.0)
-                            .color(t::TEXT_3),
-                    );
-                });
-            });
-            let fill = if level == "OK" { t::TEXT_2 } else { color };
-            limit_bar(ui, pct / 100.0, fill, width);
-        }
-    }
 }
 
 /// Line sparkline with a soft area fill and an end marker. `y_max` fixes the

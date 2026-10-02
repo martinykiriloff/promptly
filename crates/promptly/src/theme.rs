@@ -7,9 +7,9 @@ use egui::Color32;
 use promptly_core::state::SessionState;
 
 pub const BG: Rgb = Rgb {
-    r: 0x13,
-    g: 0x14,
-    b: 0x17,
+    r: 0x0f,
+    g: 0x10,
+    b: 0x12,
 };
 pub const FG: Rgb = Rgb {
     r: 0xd8,
@@ -19,11 +19,11 @@ pub const FG: Rgb = Rgb {
 pub const CURSOR: Color32 = Color32::from_rgb(0xd8, 0xd9, 0xdc);
 pub const SELECTION: Color32 = Color32::from_rgb(0x33, 0x42, 0x5c);
 
-pub const AMBER: Color32 = Color32::from_rgb(0xe0, 0xa5, 0x2e);
-pub const BLUE: Color32 = Color32::from_rgb(0x4c, 0x8d, 0xf6);
-pub const GREEN: Color32 = Color32::from_rgb(0x3f, 0xb9, 0x50);
-pub const RED: Color32 = Color32::from_rgb(0xe5, 0x53, 0x4b);
-pub const MUTED: Color32 = Color32::from_rgb(0x8b, 0x8e, 0x96);
+pub const AMBER: Color32 = Color32::from_rgb(0xe5, 0xa8, 0x42);
+pub const BLUE: Color32 = Color32::from_rgb(0x5b, 0x9c, 0xf5);
+pub const GREEN: Color32 = Color32::from_rgb(0x4c, 0xc3, 0x8a);
+pub const RED: Color32 = Color32::from_rgb(0xec, 0x6a, 0x5e);
+pub const MUTED: Color32 = Color32::from_rgb(0x6f, 0x72, 0x7b);
 
 /// Tango-ish base 16, readable on the dark background (>= 4.5:1 for the
 /// bright set and the foreground).
@@ -175,22 +175,25 @@ pub fn state_color(s: SessionState) -> Color32 {
 /// three levels; the accent is reserved for the primary action and focus.
 pub mod tokens {
     use egui::Color32;
-    pub const BG_MAIN: Color32 = Color32::from_rgb(0x13, 0x14, 0x17);
-    pub const BG_SIDEBAR: Color32 = Color32::from_rgb(0x19, 0x1a, 0x1e);
-    pub const BG_ELEVATED: Color32 = Color32::from_rgb(0x1f, 0x20, 0x25);
-    pub const BG_ELEVATED_2: Color32 = Color32::from_rgb(0x27, 0x28, 0x2e);
-    pub const BG_INPUT: Color32 = Color32::from_rgb(0x1a, 0x1b, 0x20);
-    pub const HOVER: Color32 = Color32::from_rgb(0x22, 0x23, 0x28);
-    pub const ACTIVE: Color32 = Color32::from_rgb(0x2a, 0x2b, 0x32);
-    pub const BORDER: Color32 = Color32::from_rgb(0x2a, 0x2b, 0x31);
-    pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x3a, 0x3b, 0x43);
-    pub const TEXT: Color32 = Color32::from_rgb(0xf2, 0xf2, 0xf4);
-    pub const TEXT_1: Color32 = Color32::from_rgb(0xd4, 0xd5, 0xd9);
-    pub const TEXT_2: Color32 = Color32::from_rgb(0xa3, 0xa6, 0xad);
-    pub const TEXT_3: Color32 = Color32::from_rgb(0x74, 0x77, 0x7f);
-    pub const ACCENT: Color32 = Color32::from_rgb(0xc9, 0x6a, 0x4a);
-    pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xd7, 0x78, 0x57);
-    pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(0xb5, 0x5c, 0x3e);
+    // Graphite surfaces, one step of lightness per level of elevation;
+    // hairline borders instead of shadows. (Zed / Ghostty restraint.)
+    pub const BG_MAIN: Color32 = Color32::from_rgb(0x0f, 0x10, 0x12);
+    pub const BG_SIDEBAR: Color32 = Color32::from_rgb(0x14, 0x15, 0x18);
+    pub const BG_ELEVATED: Color32 = Color32::from_rgb(0x19, 0x1a, 0x1e);
+    pub const BG_ELEVATED_2: Color32 = Color32::from_rgb(0x21, 0x22, 0x27);
+    pub const BG_INPUT: Color32 = Color32::from_rgb(0x16, 0x17, 0x1a);
+    pub const HOVER: Color32 = Color32::from_rgb(0x1c, 0x1d, 0x21);
+    pub const ACTIVE: Color32 = Color32::from_rgb(0x24, 0x25, 0x2b);
+    pub const BORDER: Color32 = Color32::from_rgb(0x23, 0x24, 0x29);
+    pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x30, 0x31, 0x38);
+    pub const TEXT: Color32 = Color32::from_rgb(0xee, 0xee, 0xf0);
+    pub const TEXT_1: Color32 = Color32::from_rgb(0xc8, 0xc9, 0xcf);
+    pub const TEXT_2: Color32 = Color32::from_rgb(0x8e, 0x91, 0x9a);
+    pub const TEXT_3: Color32 = Color32::from_rgb(0x5f, 0x62, 0x6b);
+    // Claude's terracotta, kept for the primary action, focus and "on".
+    pub const ACCENT: Color32 = Color32::from_rgb(0xd9, 0x77, 0x57);
+    pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xe3, 0x88, 0x69);
+    pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(0xc4, 0x66, 0x4a);
 }
 
 pub fn apply_chrome(ctx: &egui::Context, high_contrast: bool) {

@@ -32,6 +32,8 @@ fn shots() {
         std::env::set_var("PROMPTLY_DATA_DIR", tmp.path().join("data"));
         std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
         std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
+        // Look older than the latest release so "Check now" finds an update.
+        std::env::set_var("PROMPTLY_FAKE_VERSION", "2026.1.0");
         for k in [
             "PROMPTLY_CONTROL",
             "PROMPTLY_SOCKET",

@@ -247,26 +247,58 @@ pub fn secondary_button(ui: &mut Ui, icon: Option<Icon>, label: &str) -> Respons
 
 /// Quiet sidebar action row: icon + label; the shortcut fades in on hover.
 pub fn ghost_button(ui: &mut Ui, icon: Icon, label: &str, shortcut: Option<&str>) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    nav_row(
+        ui,
+        icon,
+        label,
+        shortcut,
+        mix(t::TEXT_2, t::TEXT_1, 0.0),
+        false,
+    )
+}
+
+/// The primary "new" row: same shape as the others, accent icon.
+pub fn new_row(ui: &mut Ui, label: &str, shortcut: Option<&str>) -> Response {
+    nav_row(ui, Icon::Plus, label, shortcut, t::ACCENT_HOVER, true)
+}
+
+fn nav_row(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    shortcut: Option<&str>,
+    icon_col: Color32,
+    strong: bool,
+) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
     let h = hover_t(ui, &resp);
     ui.painter().rect_filled(
         rect,
-        CornerRadius::same(7),
+        CornerRadius::same(6),
         mix(Color32::TRANSPARENT, t::HOVER, h),
     );
-    let fg = mix(t::TEXT_2, t::TEXT, h);
+    let text_col = if strong {
+        t::TEXT
+    } else {
+        mix(t::TEXT_2, t::TEXT, h)
+    };
+    let ic = if strong {
+        icon_col
+    } else {
+        mix(t::TEXT_3, t::TEXT_1, h)
+    };
     paint_icon(
         ui,
-        Rect::from_center_size(pos2(rect.min.x + 18.0, rect.center().y), vec2(15.0, 15.0)),
+        Rect::from_center_size(pos2(rect.min.x + 17.0, rect.center().y), vec2(14.0, 14.0)),
         icon,
-        fg,
+        ic,
     );
     ui.painter().text(
-        pos2(rect.min.x + 36.0, rect.center().y),
+        pos2(rect.min.x + 34.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        FontId::proportional(13.0),
-        fg,
+        FontId::proportional(12.5),
+        text_col,
     );
     if let Some(sc) = shortcut
         && h > 0.01
@@ -275,80 +307,43 @@ pub fn ghost_button(ui: &mut Ui, icon: Icon, label: &str, shortcut: Option<&str>
             pos2(rect.max.x - 10.0, rect.center().y),
             Align2::RIGHT_CENTER,
             sc,
-            FontId::proportional(11.5),
+            FontId::proportional(11.0),
             t::TEXT_3.gamma_multiply(h),
         );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The primary "new" row at the top of the sidebar: accent icon tile + label.
-pub fn new_row(ui: &mut Ui, label: &str, shortcut: Option<&str>) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
-    let h = hover_t(ui, &resp);
-    ui.painter().rect_filled(
-        rect,
-        CornerRadius::same(8),
-        mix(Color32::TRANSPARENT, t::HOVER, h),
-    );
-    let tile = Rect::from_center_size(pos2(rect.min.x + 18.0, rect.center().y), vec2(22.0, 22.0));
-    ui.painter().rect_filled(
-        tile,
-        CornerRadius::same(6),
-        mix(t::ACCENT, t::ACCENT_HOVER, h),
-    );
-    paint_icon(ui, tile.shrink(5.0), Icon::Plus, Color32::WHITE);
-    ui.painter().text(
-        pos2(rect.min.x + 37.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        label,
-        FontId::proportional(13.0),
-        t::TEXT,
-    );
-    if let Some(sc) = shortcut
-        && h > 0.01
-    {
-        ui.painter().text(
-            pos2(rect.max.x - 10.0, rect.center().y),
-            Align2::RIGHT_CENTER,
-            sc,
-            FontId::proportional(11.5),
-            t::TEXT_3.gamma_multiply(h),
-        );
-    }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// Small section label with an optional count.
+/// Small uppercase section label with an optional count.
 pub fn section_header(ui: &mut Ui, title: &str, count: Option<usize>, badge_color: Color32) {
-    ui.add_space(12.0);
+    ui.add_space(14.0);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
         ui.add_space(10.0);
         ui.label(
-            egui::RichText::new(title)
-                .size(11.5)
-                .strong()
+            egui::RichText::new(title.to_uppercase())
+                .size(10.5)
                 .color(t::TEXT_3),
         );
         if let Some(n) = count.filter(|n| *n > 0) {
             ui.label(
                 egui::RichText::new(n.to_string())
-                    .size(11.5)
+                    .size(10.5)
                     .color(badge_color),
             );
         }
     });
-    ui.add_space(2.0);
+    ui.add_space(4.0);
 }
 
 /// Tinted rounded label, e.g. a state or a count.
 pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
     let font = FontId::proportional(11.0);
     let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, color));
-    let size = vec2(galley.size().x + 14.0, 18.0);
+    let size = vec2(galley.size().x + 12.0, 18.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(9), color.gamma_multiply(0.14));
+        .rect_filled(rect, CornerRadius::same(4), color.gamma_multiply(0.11));
     ui.painter().galley(
         pos2(rect.min.x + 7.0, rect.center().y - galley.size().y / 2.0),
         galley,
@@ -357,19 +352,22 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
     resp
 }
 
-/// State pill with a leading dot: "● Working".
+/// Session state as a coloured dot and a quiet label ("● Working").
 pub fn state_pill(ui: &mut Ui, label: &str, color: Color32) -> Response {
+    dot_label(ui, label, color, t::TEXT_2)
+}
+
+/// A small coloured dot followed by text.
+pub fn dot_label(ui: &mut Ui, label: &str, dot: Color32, text: Color32) -> Response {
     let font = FontId::proportional(12.0);
-    let galley = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font, color));
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 26.0, 22.0), Sense::hover());
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font, text));
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 13.0, 20.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(11), color.gamma_multiply(0.12));
-    ui.painter()
-        .circle_filled(pos2(rect.min.x + 11.0, rect.center().y), 3.0, color);
+        .circle_filled(pos2(rect.min.x + 3.5, rect.center().y), 3.0, dot);
     ui.painter().galley(
-        pos2(rect.min.x + 19.0, rect.center().y - galley.size().y / 2.0),
+        pos2(rect.min.x + 13.0, rect.center().y - galley.size().y / 2.0),
         galley,
-        color,
+        text,
     );
     resp
 }
@@ -627,7 +625,7 @@ pub fn account_header(
         pos2(rect.min.x + 26.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        FontId::proportional(12.0),
+        FontId::proportional(11.5),
         mix(t::TEXT_2, t::TEXT, h),
     );
     ui.painter().text(
@@ -713,7 +711,7 @@ pub struct RowSpec<'a> {
 
 /// Two-line list row; the whole rect is the click target.
 pub fn row(ui: &mut Ui, spec: RowSpec<'_>) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
     let h = hover_t(ui, &resp);
     let painter = ui.painter_at(rect);
     let bg = if spec.active {
@@ -721,71 +719,61 @@ pub fn row(ui: &mut Ui, spec: RowSpec<'_>) -> Response {
     } else {
         mix(Color32::TRANSPARENT, t::HOVER, h)
     };
-    painter.rect_filled(rect, CornerRadius::same(8), bg);
+    painter.rect_filled(rect, CornerRadius::same(6), bg);
     if let Some(a) = spec.accent {
         painter.rect_filled(
             Rect::from_min_size(
-                pos2(rect.min.x, rect.min.y + 11.0),
-                vec2(3.0, rect.height() - 22.0),
+                pos2(rect.min.x, rect.min.y + 10.0),
+                vec2(2.0, rect.height() - 20.0),
             ),
             CornerRadius::same(2),
             a,
         );
     }
     let left = rect.min.x + 10.0;
-    let icon_c = pos2(left + 12.0, rect.center().y);
+    let icon_c = pos2(left + 7.0, rect.min.y + 13.5);
     match spec.icon {
-        Some(i) => {
-            let tile = Rect::from_center_size(icon_c, vec2(26.0, 26.0));
-            painter.rect_filled(
-                tile,
-                CornerRadius::same(7),
-                if spec.active {
-                    t::BG_ELEVATED_2
-                } else {
-                    t::BG_ELEVATED
-                },
-            );
-            paint_icon(
-                ui,
-                tile.shrink(6.5),
-                i,
-                if spec.active { t::TEXT } else { t::TEXT_2 },
-            );
-            // Status dot, cut out of the tile corner.
-            let dot = tile.right_bottom() + vec2(-1.5, -1.5);
-            let under = if spec.active {
-                t::ACTIVE
+        Some(i) => paint_icon(
+            ui,
+            Rect::from_center_size(icon_c, vec2(14.0, 14.0)),
+            i,
+            if spec.active {
+                t::TEXT_1
             } else {
-                mix(t::BG_SIDEBAR, t::HOVER, h)
-            };
-            painter.circle_filled(dot, 4.8, under);
-            painter.circle_filled(dot, 3.2, spec.dot);
-        }
+                mix(t::TEXT_3, t::TEXT_2, h)
+            },
+        ),
         None => {
-            painter.circle_filled(icon_c, 4.0, spec.dot);
+            painter.circle_filled(icon_c, 3.5, spec.dot);
         }
     }
-    let text_x = left + 32.0;
+    let text_x = left + 24.0;
     let trailing_w = spec
         .trailing
         .map(|s| text_w(ui, s, FontId::proportional(11.0)) + 10.0)
         .unwrap_or(0.0);
     let max_w = (rect.max.x - text_x - 10.0 - trailing_w).max(20.0);
     let title_col = if spec.active { t::TEXT } else { t::TEXT_1 };
-    let title = elide(ui, spec.title, FontId::proportional(13.0), title_col, max_w);
-    painter.galley(pos2(text_x, rect.min.y + 7.0), title, title_col);
+    let title = elide(ui, spec.title, FontId::proportional(12.5), title_col, max_w);
+    painter.galley(pos2(text_x, rect.min.y + 5.0), title, title_col);
+    // Status dot leads the subtitle ("● Waiting for you · ~/app").
+    let sub_x = if spec.icon.is_some() {
+        painter.circle_filled(pos2(text_x + 2.5, rect.min.y + 28.5), 2.5, spec.dot);
+        text_x + 10.0
+    } else {
+        text_x
+    };
     let sub = elide(
         ui,
         spec.subtitle,
-        FontId::proportional(11.5),
+        FontId::proportional(11.0),
         t::TEXT_3,
-        max_w + trailing_w,
+        max_w + trailing_w - (sub_x - text_x),
     );
-    painter.galley(pos2(text_x, rect.min.y + 25.0), sub, t::TEXT_3);
+    painter.galley(pos2(sub_x, rect.min.y + 22.0), sub, t::TEXT_3);
     if let Some(tr) = spec.trailing {
         painter.text(
-            pos2(rect.max.x - 10.0, rect.min.y + 15.0),
+            pos2(rect.max.x - 10.0, rect.min.y + 13.0),
             Align2::RIGHT_CENTER,
             tr,
             FontId::proportional(11.0),

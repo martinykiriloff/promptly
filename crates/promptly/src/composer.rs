@@ -116,6 +116,9 @@ pub struct Composer {
     /// Set by the app each frame: the target is a plain shell and
     /// plain-English requests become commands.
     pub shell_mode: bool,
+    /// Working folder (short) and git branch of the target, shown above the
+    /// text. Set by the app each frame.
+    pub context: Option<(String, Option<String>)>,
     /// Commands, builtins, aliases and functions the user's shell knows.
     pub known_commands: Arc<std::collections::HashSet<String>>,
     /// The user flipped Run/Ask for the current text.
@@ -456,23 +459,33 @@ impl Composer {
         }
 
         let mut text_has_focus = false;
+        // Docked editor (Warp-style): a flat, hairline-bordered block with
+        // the working folder and branch above the text.
         let card = egui::Frame::new()
-            .fill(t::BG_INPUT)
+            .fill(t::BG_ELEVATED)
             .stroke(Stroke::new(1.0, t::BORDER))
-            .corner_radius(CornerRadius::same(14))
+            .corner_radius(CornerRadius::same(10))
             .inner_margin(egui::Margin {
                 left: 14,
                 right: 8,
-                top: 12,
-                bottom: 8,
-            })
-            .shadow(egui::Shadow {
-                offset: [0, 6],
-                blur: 18,
-                spread: 0,
-                color: egui::Color32::from_black_alpha(70),
+                top: 9,
+                bottom: 7,
             });
         let card_resp = card.show(ui, |ui| {
+            if let Some((dir, branch)) = &self.context {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    let mono = FontId::monospace(11.0);
+                    ui.label(RichText::new(dir).font(mono.clone()).color(t::TEXT_3));
+                    if let Some(b) = branch {
+                        ui.add_space(6.0);
+                        let (r, _) = ui.allocate_exact_size(vec2(11.0, 11.0), Sense::hover());
+                        kit::paint_icon(ui, r, Icon::Branch, t::TEXT_3);
+                        ui.label(RichText::new(b).font(mono).color(t::TEXT_3));
+                    }
+                });
+                ui.add_space(3.0);
+            }
             // Attachment chips.
             if !self.attachments.is_empty() {
                 let mut remove = None;
@@ -490,18 +503,22 @@ impl Composer {
                 ui.add_space(6.0);
             }
             let hint = if self.shell_mode && self.attachments.is_empty() {
-                "Run a command, or describe what you want — \"install nvm using brew\"".to_string()
+                "Run a command, or describe one in plain English".to_string()
             } else if self.attachments.is_empty() {
-                format!("Message {target}")
+                format!("Message {target}…")
             } else {
                 "Add a message…".to_string()
             };
             let edit = egui::TextEdit::multiline(&mut self.text)
                 .id(id)
                 .frame(egui::Frame::NONE)
-                .desired_rows(2)
+                .desired_rows(if self.shell_mode { 1 } else { 2 })
                 .desired_width(f32::INFINITY)
-                .font(FontId::proportional(14.0))
+                .font(if self.shell_mode {
+                    FontId::monospace(13.5)
+                } else {
+                    FontId::proportional(14.0)
+                })
                 .hint_text(RichText::new(hint).size(14.0).color(t::TEXT_3));
             let resp = ui.add(edit);
             if self.focus_requested {
@@ -605,8 +622,8 @@ impl Composer {
         if text_has_focus {
             ui.painter().rect_stroke(
                 card_resp.response.rect,
-                CornerRadius::same(14),
-                Stroke::new(1.0, t::BORDER_STRONG.gamma_multiply(1.6)),
+                CornerRadius::same(10),
+                Stroke::new(1.0, t::BORDER_STRONG.gamma_multiply(1.5)),
                 egui::StrokeKind::Inside,
             );
         }

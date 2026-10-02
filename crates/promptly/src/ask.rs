@@ -236,15 +236,9 @@ pub fn card(ui: &mut egui::Ui, ask: &Ask) -> Option<CardAction> {
     let status = ask.status();
     egui::Frame::new()
         .fill(t::BG_ELEVATED)
-        .stroke(Stroke::new(1.0, t::BORDER_STRONG))
-        .corner_radius(CornerRadius::same(12))
+        .stroke(Stroke::new(1.0, t::BORDER))
+        .corner_radius(CornerRadius::same(10))
         .inner_margin(egui::Margin::symmetric(14, 12))
-        .shadow(egui::Shadow {
-            offset: [0, 6],
-            blur: 18,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(70),
-        })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {

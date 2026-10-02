@@ -1581,12 +1581,12 @@ impl App {
             (c.active().clone(), ix, c.accounts.clone(), five)
         };
         let (rect, resp) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::click());
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), egui::Sense::click());
         let h = kit::hover_t(ui, &resp);
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
         ui.painter().rect_filled(
             rect,
-            egui::CornerRadius::same(9),
+            egui::CornerRadius::same(7),
             if open {
                 t::ACTIVE
             } else {
@@ -1595,30 +1595,30 @@ impl App {
         );
         kit::paint_avatar(
             ui,
-            egui::pos2(rect.min.x + 22.0, rect.center().y),
-            13.0,
+            egui::pos2(rect.min.x + 19.0, rect.center().y),
+            10.0,
             active.initial(),
             active_ix,
         );
-        let text_x = rect.min.x + 44.0;
+        let text_x = rect.min.x + 36.0;
         let max_w = rect.max.x - text_x - 30.0;
         let title = kit::elide(
             ui,
             &active.label(),
-            FontId::proportional(13.0),
+            FontId::proportional(12.5),
             t::TEXT,
             max_w,
         );
         ui.painter()
-            .galley(egui::pos2(text_x, rect.min.y + 6.0), title, t::TEXT);
+            .galley(egui::pos2(text_x, rect.min.y + 4.0), title, t::TEXT);
         let sub = match (&active.org, active.signed_in()) {
             (Some(o), _) => o.clone(),
             (None, true) => "Personal".to_string(),
             (None, false) => "Not signed in".to_string(),
         };
-        let sub = kit::elide(ui, &sub, FontId::proportional(11.5), t::TEXT_3, max_w);
+        let sub = kit::elide(ui, &sub, FontId::proportional(11.0), t::TEXT_3, max_w);
         ui.painter()
-            .galley(egui::pos2(text_x, rect.min.y + 24.0), sub, t::TEXT_3);
+            .galley(egui::pos2(text_x, rect.min.y + 21.0), sub, t::TEXT_3);
         kit::paint_icon(
             ui,
             egui::Rect::from_center_size(
@@ -1851,7 +1851,7 @@ impl App {
         window_drag_zone(ui, strip, "sidebar-drag");
 
         self.account_switcher(ui);
-        ui.add_space(6.0);
+        ui.add_space(8.0);
 
         let new_sc = self.sc(Action::NewClaude);
         if kit::new_row(ui, "New Claude session", new_sc.as_deref()).clicked() {
@@ -1912,11 +1912,7 @@ impl App {
 
         ui.add_space(8.0);
         kit::section_header(ui, "Sessions", Some(c.sessions.len()), theme::MUTED);
-        let card_h = ui
-            .ctx()
-            .data(|d| d.get_temp::<f32>(egui::Id::new("usage-card-h")))
-            .unwrap_or(170.0);
-        let footer_h = card_h + 52.0;
+        let footer_h = 44.0;
         let list_h = (ui.available_height() - footer_h).max(60.0);
         // Sessions in tab order, grouped under their account when there is
         // more than one account.
@@ -2088,9 +2084,9 @@ impl App {
             self.switch_account(&id);
         }
 
-        // Footer: live usage card above the view toggles.
+        // Footer: view toggles. (Live usage lives in the status bar.)
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if kit::icon_button(ui, Icon::Chart, "Usage dashboard", self.usage_mode).clicked() {
@@ -2108,23 +2104,6 @@ impl App {
                     actions.push(Action::Palette);
                 }
             });
-            ui.add_space(6.0);
-            // A bottom-up layout would stretch the card; give it a box of its
-            // own measured height (from the previous frame) laid out top-down.
-            let hid = egui::Id::new("usage-card-h");
-            let h = ui.ctx().data(|d| d.get_temp::<f32>(hid)).unwrap_or(170.0);
-            let w = ui.available_width();
-            let r = ui.allocate_ui_with_layout(
-                egui::vec2(w, h),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| self.usage_card(ui),
-            );
-            let card = r.inner;
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(hid, card.rect.height()));
-            if card.clicked() {
-                actions.push(Action::Usage);
-            }
         });
 
         if let Some(id) = MUTE_TOGGLE.with(|t| t.take())
@@ -2388,33 +2367,25 @@ impl App {
         };
         ui.add_space(8.0);
         egui::Frame::new()
-            .fill(tone.gamma_multiply(0.10))
-            .stroke(egui::Stroke::new(1.0, tone.gamma_multiply(0.35)))
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::same(12))
+            .fill(t::BG_ELEVATED)
+            .stroke(egui::Stroke::new(1.0, t::BORDER))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new(title).size(13.0).color(t::TEXT));
+                    kit::dot_label(ui, &title, tone, t::TEXT);
                     if !body.is_empty() {
-                        ui.label(RichText::new(body).size(11.5).color(t::TEXT_2));
+                        ui.label(RichText::new(body).size(11.0).color(t::TEXT_3));
                     }
                     ui.add_space(6.0);
                     match &state {
                         UpdateState::Available(r) => {
                             ui.horizontal(|ui| {
-                                if kit::primary_button(
-                                    ui,
-                                    Some(Icon::Refresh),
-                                    "Update",
-                                    None,
-                                    false,
-                                )
-                                .clicked()
-                                {
+                                if kit::primary_button(ui, None, "Update", None, false).clicked() {
                                     action = Some(Action::InstallUpdate);
                                 }
-                                if ui.button("What’s new").clicked() {
+                                if kit::secondary_button(ui, None, "What’s new").clicked() {
                                     open_external(&r.html_url);
                                 }
                             });
@@ -2439,10 +2410,10 @@ impl App {
                         }
                         UpdateState::Failed(_) => {
                             ui.horizontal(|ui| {
-                                if ui.button("Try again").clicked() {
+                                if kit::secondary_button(ui, None, "Try again").clicked() {
                                     action = Some(Action::CheckUpdates);
                                 }
-                                if ui.button("Dismiss").clicked() {
+                                if kit::secondary_button(ui, None, "Dismiss").clicked() {
                                     *self.update.lock() = UpdateState::Idle;
                                 }
                             });
@@ -2454,94 +2425,236 @@ impl App {
         action
     }
 
-    /// Sidebar card: plan limits with live countdowns, plus today's spend.
-    fn usage_card(&self, ui: &mut egui::Ui) -> egui::Response {
+    /// Bottom status bar (Zed-style): account and session on the left, live
+    /// context, cost and plan limits on the right. Clicking the numbers opens
+    /// the usage dashboard.
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
         use theme::tokens as t;
         let now = promptly_core::usage::now_secs();
-        let (five, week, spend, burn, any_working, tag) = {
+        let (acct_label, acct_ix, multi, five, week, burn, any_working, session) = {
             let c = self.core.lock();
+            let a = c.active();
             let (five, week) = c.usage_of(&c.active_account).current(now);
-            let tag = c.account_tag(&c.active_account);
-            // Everything on the card is for the account in use.
             let mine = || {
                 c.sessions
                     .values()
                     .filter(|m| m.account == c.active_account)
             };
-            let spend: f64 = mine().filter_map(|m| m.status.cost_usd).sum();
             let burn: f64 = mine()
                 .filter_map(|m| m.cost_series.rate_per_hour(now as f64, 1800.0))
                 .sum();
             let working = mine().any(|m| m.state() == SessionState::Working);
-            (five, week, spend, burn, working, tag)
+            let session = self.active.and_then(|id| c.sessions.get(&id)).map(|m| {
+                (
+                    m.is_claude(),
+                    m.state(),
+                    short_path(&m.cwd.to_string_lossy()),
+                    m.branch.clone(),
+                    m.context_percent(),
+                    m.status.cost_usd,
+                )
+            });
+            (
+                a.short_label(),
+                c.account_index(&c.active_account),
+                c.multi_account(),
+                five,
+                week,
+                burn,
+                working,
+                session,
+            )
         };
         let reduce = self.reduce_motion;
-        let resp = egui::Frame::new()
-            .fill(t::BG_ELEVATED)
-            .stroke(egui::Stroke::new(1.0, t::BORDER))
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
-                // The footer lays out bottom-up; the card itself reads top-down.
-                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Usage").size(12.5).color(t::TEXT));
-                        if let Some(tag) = &tag {
-                            ui.label(RichText::new(tag).size(11.5).color(t::TEXT_3))
-                                .on_hover_text("Plan limits for the active account");
-                        }
-                        if any_working {
-                            // Live indicator: a softly pulsing dot while tokens flow.
-                            let phase = if reduce {
-                                1.0
-                            } else {
-                                (ui.input(|i| i.time) * 2.4).sin() as f32 * 0.35 + 0.65
-                            };
-                            let (r, _) =
-                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                            ui.painter().circle_filled(
-                                r.center(),
-                                3.5,
-                                theme::GREEN.gamma_multiply(phase),
-                            );
-                            ui.label(RichText::new("live").size(11.0).color(t::TEXT_3));
-                            ui.ctx().request_repaint_after(Duration::from_millis(50));
-                        }
-                    });
-                    ui.add_space(4.0);
-                    if five.is_none() && week.is_none() {
-                        ui.label(
-                            RichText::new("Plan limits appear after Claude's first reply.")
-                                .size(11.5)
-                                .color(t::TEXT_3),
-                        );
-                    } else {
-                        charts::limit_row(ui, "5-hour", five, now, reduce);
-                        ui.add_space(6.0);
-                        charts::limit_row(ui, "Weekly", week, now, reduce);
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        let s = charts::tween(ui, "spend-total", spend as f32, reduce);
-                        ui.label(RichText::new(format!("${s:.2}")).size(15.0).color(t::TEXT));
-                        ui.label(RichText::new("open sessions").size(11.0).color(t::TEXT_3));
+        let font = FontId::proportional(11.5);
+        let mut open_usage = false;
+        let mut open_accounts = false;
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(12.0);
+            // Account.
+            let r = ui
+                .horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let (d, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter()
+                        .circle_filled(d.center(), 3.5, kit::avatar_color(acct_ix));
+                    ui.label(
+                        RichText::new(&acct_label)
+                            .font(font.clone())
+                            .color(t::TEXT_2),
+                    );
+                })
+                .response
+                .interact(egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Claude account in use (⌘⇧A to switch)");
+            if r.clicked() && multi {
+                open_accounts = true;
+            }
+            let sep = |ui: &mut egui::Ui| {
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new("·")
+                        .font(FontId::proportional(11.5))
+                        .color(t::TEXT_3),
+                );
+                ui.add_space(10.0);
+            };
+            if let Some((true, st, _, _, _, _)) = &session {
+                sep(ui);
+                {
+                    let (d, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(
+                        egui::pos2(d.min.x + 3.5, d.center().y),
+                        3.0,
+                        theme::state_color(*st),
+                    );
+                    ui.label(
+                        RichText::new(kit::state_label(*st))
+                            .font(font.clone())
+                            .color(t::TEXT_2),
+                    );
+                }
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(12.0);
+                let right = ui
+                    .horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let b = charts::tween(ui, "burn-total", burn.max(0.0) as f32, reduce);
-                            ui.label(
-                                RichText::new(format!("${b:.2}/h"))
-                                    .size(11.5)
-                                    .color(t::TEXT_2),
-                            )
-                            .on_hover_text("Spend rate over the last 30 minutes");
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            let limit = |ui: &mut egui::Ui,
+                                         label: &str,
+                                         w: &Option<promptly_core::statusline::LimitWindow>,
+                                         key: &str| {
+                                match w {
+                                    Some(w) => {
+                                        let pct = charts::tween(
+                                            ui,
+                                            ("sb", key),
+                                            w.used_percentage,
+                                            reduce,
+                                        );
+                                        let (_, col) = charts::limit_level(w.used_percentage);
+                                        let col = if w.used_percentage < 70.0 {
+                                            t::TEXT_2
+                                        } else {
+                                            col
+                                        };
+                                        ui.label(
+                                            RichText::new(format!("{pct:.0}%"))
+                                                .font(font.clone())
+                                                .color(col),
+                                        );
+                                        ui.add_space(6.0);
+                                        let (r, _) = ui.allocate_exact_size(
+                                            egui::vec2(36.0, 10.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        let bar = egui::Rect::from_center_size(
+                                            r.center(),
+                                            egui::vec2(36.0, 3.0),
+                                        );
+                                        ui.painter().rect_filled(bar, 1.5, t::BORDER_STRONG);
+                                        let mut f = bar;
+                                        f.set_width(bar.width() * (pct / 100.0).clamp(0.0, 1.0));
+                                        ui.painter().rect_filled(f, 1.5, col);
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            RichText::new(label)
+                                                .font(font.clone())
+                                                .color(t::TEXT_3),
+                                        );
+                                    }
+                                    None => {
+                                        ui.label(
+                                            RichText::new("—").font(font.clone()).color(t::TEXT_3),
+                                        );
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            RichText::new(label)
+                                                .font(font.clone())
+                                                .color(t::TEXT_3),
+                                        );
+                                    }
+                                }
+                            };
+                            limit(ui, "Week", &week, "week");
+                            ui.add_space(16.0);
+                            limit(ui, "5h", &five, "five");
+                            if burn > 0.005 {
+                                ui.add_space(16.0);
+                                ui.label(
+                                    RichText::new(format!("${burn:.2}/h"))
+                                        .font(font.clone())
+                                        .color(t::TEXT_2),
+                                );
+                            }
+                            if let Some((true, _, _, _, ctx, cost)) = &session {
+                                if let Some(c) = cost {
+                                    ui.add_space(16.0);
+                                    ui.label(
+                                        RichText::new(format!("${c:.2}"))
+                                            .font(font.clone())
+                                            .color(t::TEXT_2),
+                                    );
+                                }
+                                if let Some(p) = ctx {
+                                    ui.add_space(16.0);
+                                    let col = if *p >= 80.0 { theme::AMBER } else { t::TEXT_2 };
+                                    ui.label(
+                                        RichText::new(format!("{p:.0}%"))
+                                            .font(font.clone())
+                                            .color(col),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new("context")
+                                            .font(font.clone())
+                                            .color(t::TEXT_3),
+                                    );
+                                }
+                            }
+                            if any_working {
+                                ui.add_space(16.0);
+                                let phase = if reduce {
+                                    1.0
+                                } else {
+                                    (ui.input(|i| i.time) * 2.4).sin() as f32 * 0.35 + 0.65
+                                };
+                                let (d, _) = ui.allocate_exact_size(
+                                    egui::vec2(8.0, 8.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(
+                                    d.center(),
+                                    3.0,
+                                    theme::GREEN.gamma_multiply(phase),
+                                );
+                                ui.ctx().request_repaint_after(Duration::from_millis(50));
+                            }
                         });
-                    });
-                });
-            })
-            .response;
-        resp.interact(egui::Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Open the usage dashboard")
+                    })
+                    .response
+                    .interact(egui::Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(
+                        "Plan limits for the account in use. Click for the usage dashboard.",
+                    );
+                if right.clicked() {
+                    open_usage = true;
+                }
+            });
+        });
+        if open_usage {
+            self.run(Action::Usage);
+        }
+        if open_accounts {
+            self.run(Action::SwitchAccount);
+        }
     }
 
     /// Full usage dashboard: limits with history, today's tokens, live sessions.
@@ -2826,7 +2939,7 @@ impl App {
             let c = self.core.lock();
             let Some(m) = c.sessions.get(&id) else { return };
             let (rect, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::hover());
+                .allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::hover());
             window_drag_zone(ui, rect, ("pane-drag", id));
             ui.painter().line_segment(
                 [rect.left_bottom(), rect.right_bottom()],
@@ -2834,7 +2947,7 @@ impl App {
             );
             let mut hui = ui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(rect.shrink2(egui::vec2(12.0, 0.0)))
+                    .max_rect(rect.shrink2(egui::vec2(16.0, 0.0)))
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             let ui = &mut hui;
@@ -2855,21 +2968,30 @@ impl App {
             } else {
                 theme::tokens::TEXT_2
             };
-            ui.label(RichText::new(m.display_name()).size(13.5).color(title_col))
+            ui.label(RichText::new(m.display_name()).size(13.0).color(title_col))
                 .on_hover_text(m.cwd.to_string_lossy());
             if let Some(tag) = c.account_tag(&m.account) {
                 let label = c.account(&m.account).map(|a| a.label()).unwrap_or_default();
-                kit::pill(ui, &tag, kit::avatar_color(c.account_index(&m.account)))
-                    .on_hover_text(format!("Claude account: {label}"));
+                kit::dot_label(
+                    ui,
+                    &tag,
+                    kit::avatar_color(c.account_index(&m.account)),
+                    theme::tokens::TEXT_3,
+                )
+                .on_hover_text(format!("Claude account: {label}"));
             }
             if let Some(b) = &m.branch {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
                 kit::paint_icon(ui, r, Icon::Branch, theme::tokens::TEXT_3);
                 ui.add_space(-6.0);
-                ui.label(RichText::new(b).size(12.5).color(theme::tokens::TEXT_2));
+                ui.label(
+                    RichText::new(b)
+                        .font(FontId::monospace(11.5))
+                        .color(theme::tokens::TEXT_3),
+                );
             }
             if m.is_claude() && !m.hooks_injected {
-                kit::pill(ui, "transcript-only", theme::AMBER)
+                kit::dot_label(ui, "transcript-only", theme::AMBER, theme::tokens::TEXT_3)
                     .on_hover_text("Hooks are not injected; state is derived from the transcript.");
             }
 
@@ -3731,7 +3853,7 @@ impl App {
         if let Some((msg, at)) = &self.toast {
             if at.elapsed() < Duration::from_secs(6) {
                 egui::Area::new(egui::Id::new("toast"))
-                    .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0])
+                    .anchor(egui::Align2::CENTER_TOP, [0.0, 48.0])
                     .show(ctx, |ui| {
                         kit::floating_frame()
                             .corner_radius(egui::CornerRadius::same(18))
@@ -4131,7 +4253,9 @@ impl App {
                 });
             }
             4 => {
-                let status = match &*self.update.lock() {
+                let update = self.update.lock().clone();
+                let mut restart = false;
+                let status = match &update {
                     UpdateState::Checking => "Checking…".to_string(),
                     UpdateState::UpToDate => "Promptly is up to date.".to_string(),
                     UpdateState::Available(r) => format!("Version {} is available.", r.version()),
@@ -4149,10 +4273,46 @@ impl App {
                         &format!("Promptly {}", current_version()),
                         &status,
                         |ui| {
-                            if kit::secondary_button(ui, Some(Icon::Refresh), "Check now").clicked()
-                            {
-                                actions.push(Action::CheckUpdates);
+                            // Right-to-left: the update action sits at the far right,
+                            // "Check now" beside it.
+                            match &update {
+                                UpdateState::Available(r) => {
+                                    if kit::primary_button(
+                                        ui,
+                                        None,
+                                        &format!("Update to {}", r.version()),
+                                        None,
+                                        false,
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(Action::InstallUpdate);
+                                    }
+                                    ui.add_space(6.0);
+                                }
+                                UpdateState::Working(_) | UpdateState::Checking => {
+                                    ui.add(egui::Spinner::new().size(14.0));
+                                    ui.add_space(8.0);
+                                }
+                                UpdateState::Ready { .. } => {
+                                    if kit::primary_button(ui, None, "Restart now", None, false)
+                                        .clicked()
+                                    {
+                                        restart = true;
+                                    }
+                                    ui.add_space(6.0);
+                                }
+                                _ => {}
                             }
+                            let busy =
+                                matches!(update, UpdateState::Checking | UpdateState::Working(_));
+                            ui.add_enabled_ui(!busy, |ui| {
+                                if kit::secondary_button(ui, Some(Icon::Refresh), "Check now")
+                                    .clicked()
+                                {
+                                    actions.push(Action::CheckUpdates);
+                                }
+                            });
                         },
                     );
                     kit::setting_row(
@@ -4163,6 +4323,11 @@ impl App {
                         switch(&mut self.cfg.updates.check),
                     );
                 });
+                if restart && let UpdateState::Ready { target, exe, .. } = &update {
+                    self.save_layout();
+                    promptly_core::update::relaunch(target, exe);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
             _ => {
                 let path = Config::path().to_string_lossy().to_string();
@@ -4435,6 +4600,18 @@ impl eframe::App for App {
             "Promptly".into()
         }));
 
+        egui::Panel::bottom("statusbar")
+            .resizable(false)
+            .exact_size(26.0)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(t::BG_SIDEBAR))
+            .show(ui, |ui| {
+                let r = ui.max_rect();
+                ui.painter()
+                    .hline(r.x_range(), r.min.y, egui::Stroke::new(1.0, t::BORDER));
+                self.status_bar(ui);
+            });
+
         egui::Panel::left("sidebar")
             .resizable(true)
             .default_size(264.0)
@@ -4487,10 +4664,10 @@ impl eframe::App for App {
                     egui::Frame::new()
                         .fill(t::BG_MAIN)
                         .inner_margin(egui::Margin {
-                            left: 14,
-                            right: 14,
-                            top: 8,
-                            bottom: 12,
+                            left: 12,
+                            right: 12,
+                            top: 10,
+                            bottom: 10,
                         }),
                 )
                 .show(ui, |ui| {
@@ -4514,6 +4691,12 @@ impl eframe::App for App {
                         }
                     };
                     self.composer.shell_mode = is_shell && self.ai_commands;
+                    self.composer.context = self.active.and_then(|id| {
+                        let c = self.core.lock();
+                        c.sessions
+                            .get(&id)
+                            .map(|m| (short_path(&m.cwd.to_string_lossy()), m.branch.clone()))
+                    });
                     self.composer.known_commands = self.known_commands.lock().clone();
                     self.ask_card(ui);
                     let send_sc = self.sc(Action::ToggleComposer);
@@ -4705,11 +4888,12 @@ impl App {
         }
     }
 
-    /// A command suggestion is still being written.
+    /// A command suggestion or update check is still running.
     pub fn ask_pending(&self) -> bool {
         self.ask
             .as_ref()
             .is_some_and(|a| matches!(a.status(), crate::ask::Status::Thinking))
+            || matches!(*self.update.lock(), UpdateState::Checking)
     }
 }
 
@@ -4801,6 +4985,13 @@ pub fn shot_scenes() -> Vec<Scene> {
                 a.ask = None;
                 a.start_ask(id, "delete every node_modules folder under my home".into());
             }
+        }),
+        ("20-update-available", |a| {
+            a.ask = None;
+            a.settings_open = true;
+            a.ctx
+                .data_mut(|d| d.insert_temp(egui::Id::new("settings-tab"), 4usize));
+            a.run(Action::CheckUpdates);
         }),
         ("17-open-other-account", |a| {
             a.ask = None;

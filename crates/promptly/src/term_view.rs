@@ -97,7 +97,9 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
     let outer = ui.available_rect_before_wrap();
     // Breathing room around the grid; the padding is painted as terminal background.
     ui.painter().rect_filled(outer, 0.0, theme::c32(theme::BG));
-    let rect = outer.shrink2(vec2(10.0, 0.0)).with_min_y(outer.min.y + 8.0);
+    let rect = outer
+        .shrink2(vec2(16.0, 0.0))
+        .with_min_y(outer.min.y + 12.0);
     let id = ui.id().with(("term", pane.id));
     let resp = ui.interact(rect, id, Sense::click_and_drag() | Sense::FOCUSABLE);
     ui.advance_cursor_after_rect(outer);
