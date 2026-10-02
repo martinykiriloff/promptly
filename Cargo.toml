@@ -5,5 +5,5 @@ members = ["crates/promptly-core", "crates/promptly-ctl", "crates/promptly"]
 [workspace.package]
 version = "2026.8.0"
 edition = "2021"
-license-file = "LICENSE.md"
+license = "MIT"
 rust-version = "1.85"
