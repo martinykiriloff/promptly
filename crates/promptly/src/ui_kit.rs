@@ -31,7 +31,6 @@ pub enum Icon {
     Chart,
     Thought,
     Plus,
-    Paperclip,
     Quote,
     External,
     Check,
@@ -67,7 +66,6 @@ impl Icon {
             Icon::Chart => 0xe2a3,
             Icon::Thought => 0xe3ca, // brain
             Icon::Plus => 0xe13d,
-            Icon::Paperclip => 0xe12d,
             Icon::Quote => 0xe239,
             Icon::External => 0xe0b9,
             Icon::Check => 0xe06c,

@@ -56,6 +56,8 @@ pub struct SessionMeta {
     pub pending_clipboard: Option<String>,
     /// Bumped whenever files may have changed, so the review pane refreshes.
     pub change_seq: u64,
+    /// Effort level picked in Promptly (Claude Code doesn't report it).
+    pub effort: Option<String>,
     /// Each file the agent edited, as it was before the first edit.
     pub baselines: Arc<session_changes::Baselines>,
     /// Cumulative cost (USD) and tokens over time, for burn rates and sparklines.
@@ -93,6 +95,7 @@ impl SessionMeta {
             clipboard_allowed: None,
             pending_clipboard: None,
             change_seq: 0,
+            effort: None,
             baselines: Arc::default(),
             cost_series: promptly_core::usage::Series::with_cap(2000),
             token_series: promptly_core::usage::Series::with_cap(2000),

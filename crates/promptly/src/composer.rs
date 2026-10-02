@@ -77,6 +77,8 @@ pub enum ComposerAction {
     Ask {
         request: String,
     },
+    /// A Claude Code command from the input's pickers (`/model sonnet`).
+    Command(String),
 }
 
 /// What the popup above the composer is completing.
@@ -116,9 +118,11 @@ pub struct Composer {
     /// Set by the app each frame: the target is a plain shell and
     /// plain-English requests become commands.
     pub shell_mode: bool,
-    /// Working folder (short) and git branch of the target, shown above the
-    /// text. Set by the app each frame.
-    pub context: Option<(String, Option<String>)>,
+    /// The target is a Claude session (shows the model and effort pickers).
+    pub claude_mode: bool,
+    /// The session's model and effort, for the pickers' labels.
+    pub model: Option<String>,
+    pub effort: Option<String>,
     /// Commands, builtins, aliases and functions the user's shell knows.
     pub known_commands: Arc<std::collections::HashSet<String>>,
     /// The user flipped Run/Ask for the current text.
@@ -459,33 +463,20 @@ impl Composer {
         }
 
         let mut text_has_focus = false;
-        // Docked editor (Warp-style): a flat, hairline-bordered block with
-        // the working folder and branch above the text.
+        // Chat-style input (as on claude.ai): a rounded box with the text on
+        // top and a row of controls inside it, send button at the right.
         let card = egui::Frame::new()
             .fill(t::BG_ELEVATED)
-            .stroke(Stroke::new(1.0, t::BORDER))
-            .corner_radius(CornerRadius::same(10))
+            .stroke(Stroke::new(1.0, t::BORDER_STRONG))
+            .corner_radius(CornerRadius::same(16))
             .inner_margin(egui::Margin {
-                left: 14,
-                right: 8,
-                top: 9,
-                bottom: 7,
+                left: 16,
+                right: 10,
+                top: 12,
+                bottom: 9,
             });
+        let mut command = None;
         let card_resp = card.show(ui, |ui| {
-            if let Some((dir, branch)) = &self.context {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    let mono = FontId::monospace(11.0);
-                    ui.label(RichText::new(dir).font(mono.clone()).color(t::TEXT_3));
-                    if let Some(b) = branch {
-                        ui.add_space(6.0);
-                        let (r, _) = ui.allocate_exact_size(vec2(11.0, 11.0), Sense::hover());
-                        kit::paint_icon(ui, r, Icon::Branch, t::TEXT_3);
-                        ui.label(RichText::new(b).font(mono).color(t::TEXT_3));
-                    }
-                });
-                ui.add_space(3.0);
-            }
             // Attachment chips.
             if !self.attachments.is_empty() {
                 let mut remove = None;
@@ -500,26 +491,31 @@ impl Composer {
                 if let Some(i) = remove {
                     self.attachments.remove(i);
                 }
-                ui.add_space(6.0);
+                ui.add_space(8.0);
             }
             let hint = if self.shell_mode && self.attachments.is_empty() {
                 "Run a command, or describe one in plain English".to_string()
             } else if self.attachments.is_empty() {
-                format!("Message {target}…")
+                if self.claude_mode {
+                    "Reply to Claude…".to_string()
+                } else {
+                    format!("Message {target}…")
+                }
             } else {
                 "Add a message…".to_string()
+            };
+            let font = if self.shell_mode {
+                FontId::monospace(13.5)
+            } else {
+                FontId::proportional(15.0)
             };
             let edit = egui::TextEdit::multiline(&mut self.text)
                 .id(id)
                 .frame(egui::Frame::NONE)
                 .desired_rows(if self.shell_mode { 1 } else { 2 })
                 .desired_width(f32::INFINITY)
-                .font(if self.shell_mode {
-                    FontId::monospace(13.5)
-                } else {
-                    FontId::proportional(14.0)
-                })
-                .hint_text(RichText::new(hint).size(14.0).color(t::TEXT_3));
+                .font(font.clone())
+                .hint_text(RichText::new(hint).font(font).color(t::TEXT_3));
             let resp = ui.add(edit);
             if self.focus_requested {
                 resp.request_focus();
@@ -542,19 +538,16 @@ impl Composer {
             if text_has_focus && popup.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 action = Some(ComposerAction::FocusTerminal);
             }
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             let mut send_clicked = false;
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let attach = kit::icon_button(
-                    ui,
-                    Icon::Paperclip,
-                    "Attach files, screenshots, PDFs or video",
-                    false,
-                );
-                egui::Popup::menu(&attach).show(|ui| {
-                    ui.set_min_width(220.0);
-                    if menu_item(ui, Icon::File, "Choose files…") {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                // "+" holds attachments and snippets.
+                let plus =
+                    kit::icon_button(ui, Icon::Plus, "Attach files, images or a snippet", false);
+                egui::Popup::menu(&plus).show(|ui| {
+                    ui.set_min_width(230.0);
+                    if menu_item(ui, Icon::File, "Attach files…") {
                         ui.close();
                         if let Some(files) = rfd::FileDialog::new()
                             .set_title("Attach files")
@@ -567,63 +560,80 @@ impl Composer {
                         ui.close();
                         self.paste_clipboard_image();
                     }
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new("  You can also drop files on the window")
-                            .size(11.0)
-                            .color(t::TEXT_3),
-                    );
-                });
-                let snip = kit::icon_button(ui, Icon::Quote, "Snippets", false);
-                egui::Popup::menu(&snip).show(|ui| {
-                    ui.set_min_width(220.0);
-                    for (name, body) in snippets {
-                        if menu_item(ui, Icon::Quote, name) {
-                            if !self.text.is_empty() && !self.text.ends_with('\n') {
-                                self.text.push('\n');
+                    if !snippets.is_empty() {
+                        ui.separator();
+                        for (name, body) in snippets {
+                            if menu_item(ui, Icon::Quote, name) {
+                                if !self.text.is_empty() && !self.text.ends_with('\n') {
+                                    self.text.push('\n');
+                                }
+                                self.text.push_str(body);
+                                self.focus_requested = true;
+                                ui.close();
                             }
-                            self.text.push_str(body);
-                            self.focus_requested = true;
-                            ui.close();
                         }
                     }
                 });
-                ui.add_space(6.0);
                 if self.shell_mode {
-                    if self.text.trim().is_empty() {
-                        ui.label(RichText::new("#").size(11.5).strong().color(t::TEXT_2));
-                        ui.label(RichText::new("ask Claude").size(11.5).color(t::TEXT_3));
-                    } else if intent_chip(ui, self.intent()).clicked() {
+                    if !self.text.trim().is_empty() && intent_chip(ui, self.intent()).clicked() {
                         self.intent_flip = !self.intent_flip;
                         self.focus_requested = true;
                     }
-                } else {
-                    ui.label(RichText::new("/").size(11.5).strong().color(t::TEXT_2))
-                        .on_hover_text("Commands and skills");
-                    ui.label(RichText::new("commands").size(11.5).color(t::TEXT_3));
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("@").size(11.5).strong().color(t::TEXT_2))
-                        .on_hover_text("Mention a file");
-                    ui.label(RichText::new("files").size(11.5).color(t::TEXT_3));
+                } else if self.claude_mode {
+                    ui.add_space(4.0);
+                    let label = self.model.clone().unwrap_or_else(|| "Model".to_string());
+                    let m = picker(ui, &label, "Model for this session (/model)");
+                    egui::Popup::menu(&m).show(|ui| {
+                        ui.set_min_width(220.0);
+                        for (alias, name, note) in [
+                            ("opus", "Opus", "Most capable"),
+                            ("sonnet", "Sonnet", "Fast and capable"),
+                            ("haiku", "Haiku", "Fastest"),
+                        ] {
+                            if option_item(ui, name, note) {
+                                command = Some(format!("/model {alias}"));
+                                ui.close();
+                            }
+                        }
+                    });
+                    let label = match &self.effort {
+                        Some(e) => format!("Effort {e}"),
+                        None => "Effort".to_string(),
+                    };
+                    let e = picker(ui, &label, "How hard Claude thinks (/effort)");
+                    egui::Popup::menu(&e).show(|ui| {
+                        ui.set_min_width(200.0);
+                        for (level, note) in [
+                            ("low", "Quick answers"),
+                            ("medium", "Balanced"),
+                            ("high", "Thinks longer"),
+                            ("xhigh", "Thinks much longer"),
+                            ("max", "Most thorough"),
+                        ] {
+                            if option_item(ui, level, note) {
+                                command = Some(format!("/effort {level}"));
+                                ui.close();
+                            }
+                        }
+                    });
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can_send = !self.text.trim().is_empty() || !self.attachments.is_empty();
                     if kit::send_button(ui, can_send).clicked() {
                         send_clicked = true;
                     }
-                    if text_has_focus {
-                        ui.add_space(8.0);
-                        ui.label(RichText::new("⇧↵ new line").size(11.0).color(t::TEXT_3));
-                    }
                 });
             });
             send_clicked
         });
+        if let Some(c) = command {
+            action = Some(ComposerAction::Command(c));
+        }
         if text_has_focus {
             ui.painter().rect_stroke(
                 card_resp.response.rect,
-                CornerRadius::same(10),
-                Stroke::new(1.0, t::BORDER_STRONG.gamma_multiply(1.5)),
+                CornerRadius::same(16),
+                Stroke::new(1.0, t::TEXT_3),
                 egui::StrokeKind::Inside,
             );
         }
@@ -905,6 +915,66 @@ fn intent_chip(ui: &mut egui::Ui, intent: Intent) -> egui::Response {
     );
     resp.on_hover_text("Click to switch. Start with # to always ask Claude.")
         .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Small text button with a chevron that opens a menu.
+fn picker(ui: &mut egui::Ui, label: &str, tip: &str) -> egui::Response {
+    let font = FontId::proportional(12.5);
+    let w = ui
+        .fonts_mut(|f| f.layout_no_wrap(label.into(), font.clone(), t::TEXT_2))
+        .size()
+        .x
+        + 30.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    let h = kit::hover_t(ui, &resp);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(7),
+        kit::mix(egui::Color32::TRANSPARENT, t::HOVER, h),
+    );
+    let col = kit::mix(t::TEXT_2, t::TEXT, h);
+    ui.painter().text(
+        pos2(rect.min.x + 10.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font,
+        col,
+    );
+    kit::paint_icon(
+        ui,
+        egui::Rect::from_center_size(pos2(rect.max.x - 12.0, rect.center().y), vec2(11.0, 11.0)),
+        Icon::ChevronDown,
+        col,
+    );
+    resp.on_hover_text(tip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Menu row: a name and a quiet description.
+fn option_item(ui: &mut egui::Ui, name: &str, note: &str) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    let h = kit::hover_t(ui, &resp);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(6),
+        kit::mix(egui::Color32::TRANSPARENT, t::HOVER, h),
+    );
+    ui.painter().text(
+        pos2(rect.min.x + 10.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        FontId::proportional(13.0),
+        t::TEXT,
+    );
+    ui.painter().text(
+        pos2(rect.max.x - 10.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        note,
+        FontId::proportional(11.5),
+        t::TEXT_3,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }
 
 /// Popup menu row with a leading icon.

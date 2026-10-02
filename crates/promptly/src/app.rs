@@ -4702,12 +4702,14 @@ impl eframe::App for App {
                         }
                     };
                     self.composer.shell_mode = is_shell && self.ai_commands;
-                    self.composer.context = self.active.and_then(|id| {
+                    {
                         let c = self.core.lock();
-                        c.sessions
-                            .get(&id)
-                            .map(|m| (short_path(&m.cwd.to_string_lossy()), m.branch.clone()))
-                    });
+                        let m = self.active.and_then(|id| c.sessions.get(&id));
+                        self.composer.claude_mode = m.is_some_and(|m| m.is_claude());
+                        self.composer.model = m
+                            .and_then(|m| m.status.model.clone().or_else(|| m.stats.model.clone()));
+                        self.composer.effort = m.and_then(|m| m.effort.clone());
+                    }
                     self.composer.known_commands = self.known_commands.lock().clone();
                     self.ask_card(ui);
                     let send_sc = self.sc(Action::ToggleComposer);
@@ -4726,6 +4728,17 @@ impl eframe::App for App {
                                 if self.show_claude_input {
                                     self.focus_terminal = true;
                                 }
+                            }
+                        }
+                        Some(ComposerAction::Command(cmd)) => {
+                            if let Some(id) = self.active {
+                                if let Some(level) = cmd.strip_prefix("/effort ")
+                                    && let Some(m) = self.core.lock().sessions.get_mut(&id)
+                                {
+                                    m.effort = Some(level.to_string());
+                                }
+                                self.send_message(id, &cmd, &[]);
+                                self.composer.focus_requested = true;
                             }
                         }
                         Some(ComposerAction::Ask { request }) => {
