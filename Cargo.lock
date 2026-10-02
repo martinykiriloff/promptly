@@ -2782,7 +2782,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "promptly"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "promptly-core"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2823,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "promptly-ctl"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "anyhow",
  "promptly-core",
