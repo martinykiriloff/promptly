@@ -2462,16 +2462,17 @@ impl App {
             let c = self.core.lock();
             let (five, week) = c.usage_of(&c.active_account).current(now);
             let tag = c.account_tag(&c.active_account);
-            let spend: f64 = c.sessions.values().filter_map(|m| m.status.cost_usd).sum();
-            let burn: f64 = c
-                .sessions
-                .values()
+            // Everything on the card is for the account in use.
+            let mine = || {
+                c.sessions
+                    .values()
+                    .filter(|m| m.account == c.active_account)
+            };
+            let spend: f64 = mine().filter_map(|m| m.status.cost_usd).sum();
+            let burn: f64 = mine()
                 .filter_map(|m| m.cost_series.rate_per_hour(now as f64, 1800.0))
                 .sum();
-            let working = c
-                .sessions
-                .values()
-                .any(|m| m.state() == SessionState::Working);
+            let working = mine().any(|m| m.state() == SessionState::Working);
             (five, week, spend, burn, working, tag)
         };
         let reduce = self.reduce_motion;
@@ -2564,6 +2565,8 @@ impl App {
         let week_hist = usage.seven_day_history.window(nowf, 7.0 * 86_400.0);
         let observed = usage.observed_at;
         let daily = c.daily.clone();
+        let account_tag = c.account_tag(&c.active_account);
+        let active_account = c.active_account.clone();
         struct Row {
             id: PaneId,
             name: String,
@@ -2578,7 +2581,7 @@ impl App {
         let rows: Vec<Row> = c
             .sessions
             .iter()
-            .filter(|(_, m)| m.is_claude())
+            .filter(|(_, m)| m.is_claude() && m.account == active_account)
             .map(|(id, m)| Row {
                 id: *id,
                 name: m.display_name(),
@@ -2604,6 +2607,9 @@ impl App {
             egui::Frame::new().inner_margin(egui::Margin { left: 24, right: 24, top: 14, bottom: 24 }).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Usage").size(20.0).color(t::TEXT));
+                    if let Some(tag) = &account_tag {
+                        ui.label(RichText::new(tag).size(14.0).color(t::TEXT_3));
+                    }
                     let note = match observed {
                         Some(o) => format!("Live from Claude Code · updated {} ago", fmt_until(now - o)),
                         None => "Start a Claude session to receive plan limits".into(),
