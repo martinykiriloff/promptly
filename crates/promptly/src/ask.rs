@@ -42,6 +42,8 @@ pub struct Launch {
     pub cwd: PathBuf,
     /// `CLAUDE_CONFIG_DIR` for the pane's account, if not the default.
     pub config_dir: Option<String>,
+    /// Extra environment (a local model's `ANTHROPIC_*` settings).
+    pub env: Vec<(String, String)>,
 }
 
 impl Ask {
@@ -68,6 +70,7 @@ impl Ask {
             Some(d) => cmd.env(promptly_core::accounts::CONFIG_DIR_ENV, d),
             None => cmd.env_remove(promptly_core::accounts::CONFIG_DIR_ENV),
         };
+        cmd.envs(launch.env.iter().map(|(k, v)| (k, v)));
         {
             let status = status.clone();
             let child = child.clone();

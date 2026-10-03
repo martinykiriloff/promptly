@@ -269,3 +269,105 @@ fn session_changes_e2e() {
     );
     assert_eq!(changes, vec![("main.rs".to_string(), 1, 0)]);
 }
+
+/// Claude Code on a local Ollama model, switched to from Promptly.
+/// Needs Ollama with qwen3:8b:
+///   cargo test -p promptly local_model_e2e -- --ignored --nocapture
+#[test]
+#[ignore]
+fn local_model_e2e() {
+    use std::time::{Duration, Instant};
+    let dir = std::path::PathBuf::from(
+        std::env::var("PROMPTLY_SHOTS").unwrap_or_else(|_| "/tmp/promptly-shots".into()),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    // SAFETY: test-only setup before any app threads start.
+    unsafe {
+        std::env::set_var("PROMPTLY_DATA_DIR", tmp.path().join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
+        for k in [
+            "PROMPTLY_CONTROL",
+            "PROMPTLY_SOCKET",
+            "PROMPTLY_TOKEN",
+            "PROMPTLY_SESSION",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_eframe(|cc| App::new(cc));
+    h.ctx.set_os(egui::os::OperatingSystem::Mac);
+    let pump = |h: &mut Harness<'_, App>, secs: f32| {
+        let t0 = Instant::now();
+        while t0.elapsed().as_secs_f32() < secs {
+            h.step();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let shot = |h: &mut Harness<'_, App>, name: &str| {
+        pump(h, 1.0);
+        let img = h.render().expect("render");
+        img.save(dir.join(format!("{name}.png"))).unwrap();
+        println!("wrote {name}.png");
+    };
+    pump(&mut h, 1.0);
+    h.state_mut().demo_use_account("local:ollama:qwen3:8b");
+    let id = h
+        .state_mut()
+        .demo_claude(
+            &std::env::var("PROMPTLY_LOCAL_DIR").expect("PROMPTLY_LOCAL_DIR: an existing folder"),
+        )
+        .expect("session");
+    // Wait for Claude's prompt; accept the one-time folder trust question.
+    let t0 = Instant::now();
+    let mut trusted = false;
+    loop {
+        pump(&mut h, 0.5);
+        let screen = h.state().demo_screen(id);
+        if !trusted && screen.contains("trust this folder") {
+            h.state().demo_type(id, b"\x1b[B");
+            pump(&mut h, 0.4);
+            h.state().demo_type(id, b"\r");
+            trusted = true;
+            continue;
+        }
+        if (screen.contains("❯") && !screen.contains("trust this folder"))
+            || t0.elapsed() > Duration::from_secs(60)
+        {
+            break;
+        }
+    }
+    pump(&mut h, 1.5);
+    h.state_mut().demo_send(
+        id,
+        "Reply with exactly this sentence and nothing else: local model ok",
+    );
+    // Claude Code reports the model it runs on through its status line.
+    let t0 = Instant::now();
+    loop {
+        pump(&mut h, 0.5);
+        if h.state().demo_screen(id).contains("Enter to continue") {
+            h.state().demo_type(id, b"\r");
+        }
+        let model = h.state().demo_session_account(id).and_then(|a| a.2);
+        if model.as_deref() == Some("qwen3:8b") || t0.elapsed() > Duration::from_secs(90) {
+            break;
+        }
+    }
+    pump(&mut h, 3.0);
+    shot(&mut h, "local-session");
+    let (account, cost, model) = h.state().demo_session_account(id).unwrap();
+    println!("account {account}, model {model:?}, cost {cost:?}");
+    assert_eq!(account, "local:ollama:qwen3:8b");
+    assert_eq!(
+        model.as_deref(),
+        Some("qwen3:8b"),
+        "Claude Code runs on the local model"
+    );
+    assert_eq!(cost, None, "no fake cost for a local model");
+}

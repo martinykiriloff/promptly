@@ -118,6 +118,22 @@ into a live view:
   `claude --resume`.
 - **Layout restore:** quit Promptly and your sessions are offered back next launch.
 
+### Claude accounts and local models
+
+Switch between Claude accounts (each Claude Code config folder, such as
+`~/.claude` and `~/.claude-work`) and **local models served by Ollama** from the
+account switcher at the top of the sidebar (⇧⌘A). New sessions use what you
+pick; running sessions keep theirs, and the sidebar groups sessions by it.
+
+Local models run the real Claude Code, pointed at Ollama's Anthropic-compatible
+API. Promptly lists the models you've pulled, starts Ollama if it isn't running
+(with a 32k context window, which Claude Code needs), and starts local sessions
+without your MCP servers and without extended thinking, which small models
+handle poorly. Costs and plan limits are hidden for local sessions, since they
+don't apply. Interactive Claude Code needs about 30k tokens of context, so pick
+a model with a large context window (for example a coding model with 64k+);
+small models like an 8B work for quick prompts but struggle with real tasks.
+
 ### Keyboard-first, mouse-friendly
 
 ![Command palette](docs/screenshots/palette.png)

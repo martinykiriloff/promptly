@@ -6,6 +6,10 @@
 //! launching `claude` with a different `CLAUDE_CONFIG_DIR`. Nothing here
 //! touches credentials: identity comes from the `oauthAccount` block of the
 //! account's `.claude.json`.
+//!
+//! Local models (Ollama) are accounts too: Claude Code runs unchanged, pointed
+//! at the local server through its `ANTHROPIC_*` environment variables, with
+//! the default config folder (settings, skills and history are shared).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +31,19 @@ pub struct Account {
     pub org: Option<String>,
     /// User-chosen name, if any.
     pub name: Option<String>,
+    /// Set for a local model instead of a Claude account.
+    pub local: Option<LocalModel>,
+}
+
+/// A model served on this machine with an Anthropic-compatible API.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalModel {
+    /// "Ollama".
+    pub provider: String,
+    /// e.g. `http://localhost:11434`.
+    pub base_url: String,
+    /// e.g. `qwen3:8b`.
+    pub model: String,
 }
 
 impl Account {
@@ -39,9 +56,63 @@ impl Account {
             email: None,
             org: None,
             name: None,
+            local: None,
         };
         a.reload_identity(home);
         a
+    }
+
+    /// A local model; its sessions use the default config folder.
+    pub fn local(m: LocalModel, home: &Path) -> Self {
+        Self {
+            id: format!("local:{}:{}", m.provider.to_lowercase(), m.model),
+            dir: home.join(".claude"),
+            is_home: true,
+            email: None,
+            org: None,
+            name: None,
+            local: Some(m),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.local.is_some()
+    }
+
+    /// Extra `claude` arguments: local models skip the user's MCP servers,
+    /// whose many tools crowd a small model's context (and slow it ~2x).
+    pub fn session_args(&self) -> Vec<String> {
+        if self.is_local() {
+            vec!["--strict-mcp-config".into()]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Extra environment for sessions: points Claude Code at a local model
+    /// (every model tier and subagents included). Empty for Claude accounts.
+    pub fn session_env(&self) -> Vec<(String, String)> {
+        let Some(m) = &self.local else {
+            return vec![];
+        };
+        let mut env = vec![
+            // Small local models do better without extended thinking.
+            ("MAX_THINKING_TOKENS".into(), "0".into()),
+            ("ANTHROPIC_BASE_URL".into(), m.base_url.clone()),
+            ("ANTHROPIC_AUTH_TOKEN".into(), m.provider.to_lowercase()),
+            // An inherited API key would win over the local server.
+            ("ANTHROPIC_API_KEY".into(), String::new()),
+        ];
+        for k in [
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ] {
+            env.push((k.into(), m.model.clone()));
+        }
+        env
     }
 
     /// Where Claude Code keeps this account's `.claude.json`.
@@ -72,11 +143,14 @@ impl Account {
     }
 
     pub fn signed_in(&self) -> bool {
-        self.email.is_some()
+        self.local.is_some() || self.email.is_some()
     }
 
     /// Full label: the custom name, else the email, else the folder.
     pub fn label(&self) -> String {
+        if let Some(m) = &self.local {
+            return self.name.clone().unwrap_or_else(|| m.model.clone());
+        }
         self.name
             .clone()
             .or_else(|| self.email.clone())
@@ -88,6 +162,9 @@ impl Account {
     pub fn short_label(&self) -> String {
         if let Some(n) = &self.name {
             return n.clone();
+        }
+        if let Some(m) = &self.local {
+            return m.model.clone();
         }
         if let Some(o) = &self.org {
             return o.clone();
@@ -106,6 +183,9 @@ impl Account {
 
     /// Secondary line in the switcher: organization or folder.
     pub fn detail(&self) -> String {
+        if let Some(m) = &self.local {
+            return format!("{} · runs on this Mac", m.provider);
+        }
         match (&self.org, self.signed_in()) {
             (Some(o), _) => format!("{o} · {}", self.tilde_dir()),
             (None, true) => self.tilde_dir(),
@@ -152,7 +232,7 @@ impl Account {
 
     /// Whether a transcript (or any file) lives under this account.
     pub fn owns(&self, path: &Path) -> bool {
-        path.starts_with(&self.dir)
+        self.local.is_none() && path.starts_with(&self.dir)
     }
 }
 

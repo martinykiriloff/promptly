@@ -123,6 +123,8 @@ pub struct Composer {
     /// The session's model and effort, for the pickers' labels.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The session runs on a local model (no Claude model/effort pickers).
+    pub local_model: Option<String>,
     /// Commands, builtins, aliases and functions the user's shell knows.
     pub known_commands: Arc<std::collections::HashSet<String>>,
     /// The user flipped Run/Ask for the current text.
@@ -669,6 +671,14 @@ impl Composer {
                         self.intent_flip = !self.intent_flip;
                         self.focus_requested = true;
                     }
+                } else if let Some(m) = &self.local_model {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!("{m} · local"))
+                            .size(12.5)
+                            .color(t::TEXT_2),
+                    )
+                    .on_hover_text("This session runs on a local model through Ollama");
                 } else if self.claude_mode {
                     ui.add_space(4.0);
                     let label = self.model.clone().unwrap_or_else(|| "Model".to_string());

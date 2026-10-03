@@ -9,6 +9,7 @@ pub mod git;
 pub mod hooks;
 pub mod index;
 pub mod ipc;
+pub mod local_models;
 pub mod nl_command;
 pub mod paths;
 pub mod sanitize;

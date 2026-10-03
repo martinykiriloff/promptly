@@ -158,6 +158,8 @@ pub struct Core {
     /// The account new sessions use.
     pub active_account: String,
     accounts_file: AccountsFile,
+    /// Local models found on this machine (Ollama), as accounts.
+    local: Vec<promptly_core::accounts::LocalModel>,
     /// Plan limits reported by Claude Code, per account id.
     pub usage: HashMap<String, AccountUsage>,
     /// Today's tokens across every Claude session on the machine.
@@ -180,6 +182,7 @@ impl Core {
             accounts: vec![],
             active_account: String::new(),
             accounts_file: AccountsFile::load(),
+            local: promptly_core::local_models::discover(),
             usage: HashMap::new(),
             daily: None,
         }
@@ -209,16 +212,28 @@ impl Core {
     /// Re-scan account folders and identities (e.g. after a `/login`).
     pub fn refresh_accounts(&mut self) {
         let inherited = crate::INHERITED_CONFIG_DIR.get().map(PathBuf::as_path);
-        self.accounts = accounts::discover(
-            &promptly_core::paths::home(),
-            &self.accounts_file,
-            inherited,
-        );
+        let home = promptly_core::paths::home();
+        self.accounts = accounts::discover(&home, &self.accounts_file, inherited);
+        for m in &self.local {
+            let mut a = Account::local(m.clone(), &home);
+            a.name = self.accounts_file.names.get(&a.id).cloned();
+            self.accounts.push(a);
+        }
         for a in &self.accounts {
             self.usage
                 .entry(a.id.clone())
                 .or_insert_with(|| AccountUsage::load(a));
         }
+    }
+
+    /// Replace the local models (from a background scan). True if changed.
+    pub fn set_local_models(&mut self, models: Vec<promptly_core::accounts::LocalModel>) -> bool {
+        if models == self.local {
+            return false;
+        }
+        self.local = models;
+        self.refresh_accounts();
+        true
     }
 
     pub fn account(&self, id: &str) -> Option<&Account> {
@@ -443,6 +458,17 @@ impl ClaudeLink {
                         let now = promptly_core::usage::now_secs();
                         let limits = info.rate_limits;
                         let account = c.sessions.get(&pane).map(|m| m.account.clone());
+                        let local = account
+                            .as_deref()
+                            .and_then(|id| c.account(id))
+                            .is_some_and(Account::is_local);
+                        // Claude Code prices local models as if they were
+                        // Claude; they're free and have no plan limits.
+                        let mut info = info;
+                        let limits = if local { None } else { limits };
+                        if local {
+                            info.cost_usd = None;
+                        }
                         if let Some(meta) = c.sessions.get_mut(&pane) {
                             if let Some(cost) = info.cost_usd {
                                 meta.cost_series.push(now as f64, cost);

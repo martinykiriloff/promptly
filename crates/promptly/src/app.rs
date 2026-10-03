@@ -614,6 +614,24 @@ impl App {
         if let Some(dir) = account.env_value() {
             env.insert(promptly_core::accounts::CONFIG_DIR_ENV.into(), dir);
         }
+        // A local model: point Claude Code at it, starting Ollama if needed.
+        env.extend(account.session_env());
+        if let Some(m) = &account.local
+            && req.claude
+        {
+            match promptly_core::local_models::ensure_ollama(&m.base_url) {
+                Ok(true) => self.toast(format!(
+                    "Started Ollama for {} (context {}k)",
+                    m.model,
+                    promptly_core::local_models::OLLAMA_CONTEXT
+                        .parse::<u32>()
+                        .unwrap_or(0)
+                        / 1024
+                )),
+                Ok(false) => {}
+                Err(e) => self.toast(e),
+            }
+        }
         if let Some(ctl) = &self.ctl_path
             && let Some(dir) = ctl.parent()
         {
@@ -650,6 +668,7 @@ impl App {
             }
             let session_id = req.resume.clone().unwrap_or_else(util::new_uuid);
             let mut args = config::claude_args(&self.cfg, profile.as_ref());
+            args.extend(account.session_args());
             if let Some(r) = &req.resume {
                 args.extend(["--resume".into(), r.clone()]);
             } else {
@@ -1472,7 +1491,7 @@ impl App {
         } else {
             vec![]
         };
-        let (cwd, config_dir) = {
+        let (cwd, config_dir, acct_env, local_model) = {
             let c = self.core.lock();
             let m = c.sessions.get(&id);
             let cwd = m
@@ -1481,7 +1500,12 @@ impl App {
             let acct = m
                 .and_then(|m| c.account(&m.account))
                 .unwrap_or_else(|| c.active());
-            (cwd, acct.env_value())
+            (
+                cwd,
+                acct.env_value(),
+                acct.session_env(),
+                acct.local.as_ref().map(|l| l.model.clone()),
+            )
         };
         let context = promptly_core::nl_command::ShellContext {
             os,
@@ -1501,9 +1525,10 @@ impl App {
             crate::ask::Launch {
                 shell,
                 binary: self.cfg.claude.binary.clone(),
-                model: self.ai_model.clone(),
+                model: local_model.unwrap_or_else(|| self.ai_model.clone()),
                 cwd,
                 config_dir,
+                env: acct_env,
             },
             self.ctx.clone(),
         ));
@@ -1667,6 +1692,16 @@ impl App {
             );
             ui.add_space(2.0);
             for (i, (a, pct)) in accounts.iter().zip(&five).enumerate() {
+                if a.is_local() && !accounts[..i].iter().any(|x| x.is_local()) {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Local models")
+                            .size(11.5)
+                            .strong()
+                            .color(t::TEXT_3),
+                    );
+                    ui.add_space(2.0);
+                }
                 let (r, resp) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 42.0),
                     egui::Sense::click(),
@@ -4637,6 +4672,14 @@ impl eframe::App for App {
         if self.accounts_checked.elapsed() > Duration::from_secs(15) {
             self.accounts_checked = Instant::now();
             self.core.lock().refresh_accounts();
+            // Local models (a new `ollama pull` shows up), off the UI thread.
+            let (core, ctx) = (self.core.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let models = promptly_core::local_models::discover();
+                if core.lock().set_local_models(models) {
+                    ctx.request_repaint();
+                }
+            });
         }
         if self.last_poll.elapsed() > Duration::from_secs(5) {
             self.last_poll = Instant::now();
@@ -4847,6 +4890,9 @@ impl eframe::App for App {
                         self.composer.model = m
                             .and_then(|m| m.status.model.clone().or_else(|| m.stats.model.clone()));
                         self.composer.effort = m.and_then(|m| m.effort.clone());
+                        self.composer.local_model = m
+                            .and_then(|m| c.account(&m.account))
+                            .and_then(|a| a.local.as_ref().map(|l| l.model.clone()));
                     }
                     self.composer.known_commands = self.known_commands.lock().clone();
                     self.ask_card(ui);
@@ -5086,6 +5132,23 @@ impl App {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Make an account (or local model) the active one.
+    pub fn demo_use_account(&mut self, id: &str) {
+        self.switch_account(id);
+    }
+
+    /// The session's account id, reported cost and reported model.
+    pub fn demo_session_account(
+        &self,
+        id: PaneId,
+    ) -> Option<(String, Option<f64>, Option<String>)> {
+        self.core
+            .lock()
+            .sessions
+            .get(&id)
+            .map(|m| (m.account.clone(), m.status.cost_usd, m.status.model.clone()))
     }
 
     /// Claude is working on a turn.
