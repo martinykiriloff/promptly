@@ -10,6 +10,7 @@ arboard = { version = "3.6.1", features = ["image-data"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 eframe = { version = "0.36.2", default-features = false, features = ["wgpu", "accesskit", "default_fonts", "wayland", "x11"] }
 egui = "0.36.2"
+fontdb = "0.24"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 notify-rust = "4.18.1"
 parking_lot = "0.12.5"

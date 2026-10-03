@@ -77,6 +77,10 @@ pub struct ViewOutput {
 
 pub struct ViewOptions {
     pub font: FontId,
+    /// Same size, the font's bold face (for bold cells).
+    pub bold_font: FontId,
+    /// Draw text in runs so the font's ligatures form (`->` `!=` `=>`).
+    pub ligatures: bool,
     pub claude_pane: bool,
     pub option_as_meta: bool,
     pub request_focus: bool,
@@ -428,8 +432,9 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
     let mut run = String::new();
     let mut run_start = 0usize;
     let mut run_color = Color32::WHITE;
+    let mut run_bold = false;
     let mut run_line = usize::MAX;
-    let flush = |run: &mut String, line: usize, start: usize, color: Color32| {
+    let flush = |run: &mut String, line: usize, start: usize, color: Color32, bold: bool| {
         if !run.is_empty() {
             let p = pos2(
                 snap(rect.min.x + start as f32 * cell.x),
@@ -439,7 +444,11 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
                 p,
                 egui::Align2::LEFT_TOP,
                 run.as_str(),
-                opts.font.clone(),
+                if bold {
+                    opts.bold_font.clone()
+                } else {
+                    opts.font.clone()
+                },
                 color,
             );
             run.clear();
@@ -499,16 +508,20 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
         }
         let ch = c.c;
         let hidden = c.flags.contains(Flags::HIDDEN) || ch == ' ' || ch == '\0';
+        let bold = c.flags.contains(Flags::BOLD);
         let simple = ch.is_ascii() && width == 1.0;
-        // ASCII is batched into runs; anything else is placed per cell so
-        // fallback-font glyphs can never shift the grid.
-        let continues = simple
+        // ASCII is batched into runs (egui shapes each run, which is what
+        // forms ligatures); anything else is placed per cell so fallback-font
+        // glyphs can never shift the grid. Ligatures off: one cell per call.
+        let continues = opts.ligatures
+            && simple
             && !hidden
             && run_line == line
             && color == run_color
+            && bold == run_bold
             && run_start + run.chars().count() == vp.column.0;
         if !continues {
-            flush(&mut run, run_line, run_start, run_color);
+            flush(&mut run, run_line, run_start, run_color, run_bold);
         }
         if hidden {
             continue;
@@ -518,6 +531,7 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
                 run_start = vp.column.0;
                 run_line = line;
                 run_color = color;
+                run_bold = bold;
             }
             run.push(ch);
         } else {
@@ -529,12 +543,16 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
                 pos2(snap(x), snap(y)),
                 egui::Align2::LEFT_TOP,
                 s,
-                opts.font.clone(),
+                if bold {
+                    opts.bold_font.clone()
+                } else {
+                    opts.font.clone()
+                },
                 color,
             );
         }
     }
-    flush(&mut run, run_line, run_start, run_color);
+    flush(&mut run, run_line, run_start, run_color, run_bold);
 
     // Cursor
     if mode.contains(TermMode::SHOW_CURSOR)

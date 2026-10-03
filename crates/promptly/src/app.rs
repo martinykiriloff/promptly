@@ -297,6 +297,12 @@ pub struct App {
     ai_output: bool,
     /// Model for generated commands ("sonnet" or "haiku").
     ai_model: String,
+    /// Terminal font family (fonts::BUILTIN = Fira Code Retina).
+    terminal_font: String,
+    /// Draw the terminal font's ligatures.
+    ligatures: bool,
+    /// Installed monospace families, loaded when Settings first needs them.
+    mono_families: Arc<Mutex<Option<Vec<String>>>>,
     /// Name typed in the "Add account" sheet, while it is open.
     add_account: Option<String>,
     /// Last time account identities were re-read (to catch a `/login`).
@@ -333,7 +339,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = cc.egui_ctx.clone();
         let (cfg, cfg_error) = Config::load();
-        crate::fonts::install(&ctx);
+        let early = Prefs::load();
+        crate::fonts::install(&ctx, &early.terminal_font);
         theme::apply_chrome(&ctx, false);
         let _ = shell_integration::install();
         let (tx, rx) = mpsc::channel();
@@ -459,6 +466,9 @@ impl App {
             ai_commands: true,
             ai_output: true,
             ai_model: "sonnet".into(),
+            terminal_font: crate::fonts::BUILTIN.into(),
+            ligatures: true,
+            mono_families: Arc::default(),
             add_account: None,
             accounts_checked: Instant::now(),
             settings_open: false,
@@ -496,6 +506,8 @@ impl App {
         app.ai_commands = prefs.ai_commands;
         app.ai_output = prefs.ai_output;
         app.ai_model = prefs.ai_model.clone();
+        app.terminal_font = prefs.terminal_font.clone();
+        app.ligatures = prefs.ligatures;
         {
             let known = app.known_commands.clone();
             let shell = shell_integration::user_shell(app.cfg.shell.as_deref());
@@ -548,6 +560,10 @@ impl App {
 
     fn font(&self) -> FontId {
         FontId::monospace(self.font_size)
+    }
+
+    fn bold_font(&self) -> FontId {
+        FontId::new(self.font_size, crate::fonts::bold_family())
     }
 
     // ------------------------------------------------------------ sessions
@@ -2138,6 +2154,8 @@ impl App {
             ai_commands: self.ai_commands,
             ai_output: self.ai_output,
             ai_model: self.ai_model.clone(),
+            terminal_font: self.terminal_font.clone(),
+            ligatures: self.ligatures,
         }
         .save();
     }
@@ -3191,6 +3209,8 @@ impl App {
         let searching = self.panes.get(&id).is_some_and(|e| e.view.search.is_some());
         let opts = ViewOptions {
             font: self.font(),
+            bold_font: self.bold_font(),
+            ligatures: self.ligatures,
             claude_pane: is_claude,
             option_as_meta: self.option_as_meta,
             request_focus: request_focus && !searching,
@@ -3904,6 +3924,7 @@ impl App {
             self.option_as_meta,
             self.high_contrast,
             (self.ai_commands, self.ai_output, self.ai_model.clone()),
+            (self.terminal_font.clone(), self.ligatures),
         );
         let modal = egui::Modal::new(egui::Id::new("settings"))
             .frame(
@@ -3994,6 +4015,7 @@ impl App {
                 self.option_as_meta,
                 self.high_contrast,
                 (self.ai_commands, self.ai_output, self.ai_model.clone()),
+                (self.terminal_font.clone(), self.ligatures),
             )
         {
             self.save_prefs();
@@ -4211,8 +4233,112 @@ impl App {
             }
             1 => self.accounts_section(ui, actions),
             2 => {
+                // Installed monospace fonts, scanned once in the background.
+                if self.mono_families.lock().is_none() {
+                    *self.mono_families.lock() = Some(vec![]);
+                    let slot = self.mono_families.clone();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let names = crate::fonts::system_monospace()
+                            .into_iter()
+                            .map(|f| f.name)
+                            .filter(|n| n != crate::fonts::BUILTIN)
+                            .collect();
+                        *slot.lock() = Some(names);
+                        ctx.request_repaint();
+                    });
+                }
+                let families = self.mono_families.lock().clone().unwrap_or_default();
+                let mut new_font = None;
                 kit::settings_group(ui, Some("Terminal"), |ui| {
-                    kit::setting_row(ui, true, "Font size", "", |ui| {
+                    kit::setting_row(
+                        ui,
+                        true,
+                        "Font",
+                        "Monospace fonts installed on this Mac.",
+                        |ui| {
+                            let r = kit::secondary_button(
+                                ui,
+                                Some(Icon::ChevronDown),
+                                &self.terminal_font,
+                            );
+                            egui::Popup::menu(&r).show(|ui| {
+                                ui.set_min_width(260.0);
+                                egui::ScrollArea::vertical()
+                                    .max_height(320.0)
+                                    .show(ui, |ui| {
+                                        let builtin =
+                                            format!("{} (built in)", crate::fonts::BUILTIN);
+                                        if ui
+                                            .selectable_label(
+                                                self.terminal_font == crate::fonts::BUILTIN,
+                                                builtin,
+                                            )
+                                            .clicked()
+                                        {
+                                            new_font = Some(crate::fonts::BUILTIN.to_string());
+                                            ui.close();
+                                        }
+                                        if families.is_empty() {
+                                            ui.label(
+                                                RichText::new("Looking for installed fonts…")
+                                                    .size(12.0)
+                                                    .color(theme::tokens::TEXT_3),
+                                            );
+                                        }
+                                        for f in &families {
+                                            if ui
+                                                .selectable_label(self.terminal_font == *f, f)
+                                                .clicked()
+                                            {
+                                                new_font = Some(f.clone());
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                            });
+                        },
+                    );
+                    kit::setting_row(
+                        ui,
+                        false,
+                        "Ligatures",
+                        "Join character pairs like -> != => into one symbol, if the font has them.",
+                        switch(&mut self.ligatures),
+                    );
+                    // Preview in the terminal font itself.
+                    ui.add_space(10.0);
+                    egui::Frame::new()
+                        .fill(theme::c32(theme::BG))
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(12, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let sample = "fn main() -> Result<(), Error> {\n    if a != b && x >= 0 { ok(|v| v => v) }\n}";
+                            if self.ligatures {
+                                ui.label(
+                                    RichText::new(sample)
+                                        .font(FontId::monospace(13.0))
+                                        .color(theme::tokens::TEXT_1),
+                                );
+                            } else {
+                                // One glyph at a time, as the terminal draws it.
+                                for line in sample.lines() {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+                                        for ch in line.chars() {
+                                            ui.label(
+                                                RichText::new(ch.to_string())
+                                                    .font(FontId::monospace(13.0))
+                                                    .color(theme::tokens::TEXT_1),
+                                            );
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                    ui.add_space(10.0);
+                    kit::setting_row(ui, false, "Font size", "", |ui| {
                         kit::stepper(ui, &mut self.font_size, 8.0..=32.0, " pt")
                     });
                     kit::setting_row(
@@ -4223,6 +4349,12 @@ impl App {
                         switch(&mut self.option_as_meta),
                     );
                 });
+                if let Some(f) = new_font
+                    && f != self.terminal_font
+                {
+                    self.terminal_font = f;
+                    crate::fonts::install(ui.ctx(), &self.terminal_font);
+                }
                 let mut hc = false;
                 kit::settings_group(ui, Some("Accessibility"), |ui| {
                     kit::setting_row(
@@ -5094,6 +5226,28 @@ pub fn shot_scenes() -> Vec<Scene> {
                 a.start_ask(id, "delete every node_modules folder under my home".into());
             }
         }),
+        ("21-ligatures-on", |a| {
+            a.settings_open = false;
+            a.ask = None;
+            a.thinking_open = false;
+            if let Some(id) = a.spawn(NewSession {
+                cwd: Some("/tmp".into()),
+                ..Default::default()
+            }) && let Some(e) = a.panes.get(&id)
+            {
+                e.pane.write(
+                    b"clear; printf '%s\\n' 'fn add(a: i32) -> i32 { a => b; x != y; z === w; p >= q && r <= s |> t :: u }'\r"
+                        .to_vec(),
+                );
+            }
+        }),
+        ("22-ligatures-off", |a| a.ligatures = false),
+        ("23-font-settings", |a| {
+            a.ligatures = true;
+            a.settings_open = true;
+            a.ctx
+                .data_mut(|d| d.insert_temp(egui::Id::new("settings-tab"), 2usize));
+        }),
         ("20-update-available", |a| {
             a.ask = None;
             a.settings_open = true;
@@ -5130,6 +5284,8 @@ struct Prefs {
     ai_commands: bool,
     ai_output: bool,
     ai_model: String,
+    terminal_font: String,
+    ligatures: bool,
 }
 
 impl Default for Prefs {
@@ -5144,6 +5300,8 @@ impl Default for Prefs {
             ai_commands: true,
             ai_output: true,
             ai_model: "sonnet".into(),
+            terminal_font: crate::fonts::BUILTIN.into(),
+            ligatures: true,
         }
     }
 }

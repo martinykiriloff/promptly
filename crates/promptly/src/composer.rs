@@ -1200,7 +1200,7 @@ mod tests {
                 move |ui, st: &mut S| {
                     // Fonts apply from the next frame: draw nothing until then.
                     if !st.fonts {
-                        crate::fonts::install(ui.ctx());
+                        crate::fonts::install(ui.ctx(), crate::fonts::BUILTIN);
                         st.fonts = true;
                         return;
                     }
