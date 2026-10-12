@@ -238,17 +238,17 @@ pub fn card(ui: &mut egui::Ui, ask: &Ask) -> Option<CardAction> {
     let mut action = None;
     let status = ask.status();
     egui::Frame::new()
-        .fill(t::BG_ELEVATED)
-        .stroke(Stroke::new(1.0, t::BORDER))
+        .fill(t::BG_ELEVATED())
+        .stroke(Stroke::new(1.0, t::BORDER()))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
-                kit::paint_icon(ui, r, Icon::Sparkle, t::ACCENT_HOVER);
+                kit::paint_icon(ui, r, Icon::Sparkle, t::ACCENT_HOVER());
                 let w = ui.available_width() - 40.0;
-                let g = kit::elide(ui, &ask.request, FontId::proportional(12.5), t::TEXT_2, w);
+                let g = kit::elide(ui, &ask.request, FontId::proportional(12.5), t::TEXT_2(), w);
                 ui.label(g);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if kit::icon_button(ui, Icon::Close, "Dismiss (Esc)", false).clicked() {
@@ -260,20 +260,20 @@ pub fn card(ui: &mut egui::Ui, ask: &Ask) -> Option<CardAction> {
             match &status {
                 Status::Thinking => {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(14.0).color(t::TEXT_2));
+                        ui.add(egui::Spinner::new().size(14.0).color(t::TEXT_2()));
                         ui.label(
                             RichText::new(format!(
                                 "Writing a command…  {}s",
                                 ask.started.elapsed().as_secs()
                             ))
                             .size(13.0)
-                            .color(t::TEXT_2),
+                            .color(t::TEXT_2()),
                         );
                     });
                     ui.ctx().request_repaint_after(Duration::from_millis(250));
                 }
                 Status::Failed(e) => {
-                    ui.label(RichText::new(e).size(12.5).color(theme::RED));
+                    ui.label(RichText::new(e).size(12.5).color(theme::RED()));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if kit::secondary_button(ui, Some(Icon::Refresh), "Try again").clicked() {
@@ -282,12 +282,12 @@ pub fn card(ui: &mut egui::Ui, ask: &Ask) -> Option<CardAction> {
                     });
                 }
                 Status::Ready(s) if s.command.is_empty() => {
-                    ui.label(RichText::new(&s.explanation).size(13.0).color(t::TEXT_1));
+                    ui.label(RichText::new(&s.explanation).size(13.0).color(t::TEXT_1()));
                 }
                 Status::Ready(s) => {
                     egui::Frame::new()
-                        .fill(t::BG_INPUT)
-                        .stroke(Stroke::new(1.0, t::BORDER))
+                        .fill(t::BG_INPUT())
+                        .stroke(Stroke::new(1.0, t::BORDER()))
                         .corner_radius(CornerRadius::same(8))
                         .inner_margin(egui::Margin::symmetric(12, 9))
                         .show(ui, |ui| {
@@ -296,7 +296,7 @@ pub fn card(ui: &mut egui::Ui, ask: &Ask) -> Option<CardAction> {
                                 egui::Label::new(
                                     RichText::new(&s.command)
                                         .font(FontId::monospace(13.5))
-                                        .color(t::TEXT),
+                                        .color(t::TEXT()),
                                 )
                                 .wrap()
                                 .selectable(true),
@@ -304,27 +304,27 @@ pub fn card(ui: &mut egui::Ui, ask: &Ask) -> Option<CardAction> {
                         });
                     ui.add_space(8.0);
                     if !s.explanation.is_empty() {
-                        ui.label(RichText::new(&s.explanation).size(12.5).color(t::TEXT_2));
+                        ui.label(RichText::new(&s.explanation).size(12.5).color(t::TEXT_2()));
                     }
                     if !s.note.is_empty() {
                         ui.add_space(2.0);
                         ui.label(
                             RichText::new(format!("Then: {}", s.note))
                                 .size(12.0)
-                                .color(t::TEXT_3),
+                                .color(t::TEXT_3()),
                         );
                     }
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         match s.risk {
                             Risk::Danger => {
-                                kit::pill(ui, "Destructive — read it before running", theme::RED);
+                                kit::pill(ui, "Destructive — read it before running", theme::RED());
                             }
                             Risk::Caution => {
-                                kit::pill(ui, "Changes your system", theme::AMBER);
+                                kit::pill(ui, "Changes your system", theme::AMBER());
                             }
                             Risk::Safe => {
-                                kit::pill(ui, "Read-only", theme::GREEN);
+                                kit::pill(ui, "Read-only", theme::GREEN());
                             }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

@@ -117,7 +117,7 @@ pub fn mix(a: Color32, b: Color32, k: f32) -> Color32 {
 }
 
 fn text_w(ui: &Ui, text: &str, font: FontId) -> f32 {
-    ui.fonts_mut(|f| f.layout_no_wrap(text.into(), font, t::TEXT).size().x)
+    ui.fonts_mut(|f| f.layout_no_wrap(text.into(), font, t::TEXT()).size().x)
 }
 
 /// Square, frameless icon button with an eased hover.
@@ -125,15 +125,15 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str, active: bool) -> Resp
     let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
     let h = hover_t(ui, &resp);
     let bg = if active {
-        t::ACTIVE
+        t::ACTIVE()
     } else {
-        mix(Color32::TRANSPARENT, t::HOVER, h)
+        mix(Color32::TRANSPARENT, t::HOVER(), h)
     };
     ui.painter().rect_filled(rect, CornerRadius::same(7), bg);
     let fg = if active {
-        t::TEXT
+        t::TEXT()
     } else {
-        mix(t::TEXT_2, t::TEXT, h)
+        mix(t::TEXT_2(), t::TEXT(), h)
     };
     paint_icon(ui, rect.shrink(7.0), icon, fg);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -162,11 +162,11 @@ pub fn primary_button(
     let h = hover_t(ui, &resp);
     let enabled = ui.is_enabled();
     let fill = if !enabled {
-        t::BG_ELEVATED_2
+        t::BG_ELEVATED_2()
     } else if resp.is_pointer_button_down_on() {
-        t::ACCENT_PRESSED
+        t::ACCENT_PRESSED()
     } else {
-        mix(t::ACCENT, t::ACCENT_HOVER, h)
+        mix(t::ACCENT(), t::ACCENT_HOVER(), h)
     };
     ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
     if enabled {
@@ -179,7 +179,11 @@ pub fn primary_button(
             Stroke::new(1.0, Color32::from_white_alpha(36)),
         );
     }
-    let fg = if enabled { Color32::WHITE } else { t::TEXT_3 };
+    let fg = if enabled {
+        crate::theme::on_accent()
+    } else {
+        t::TEXT_3()
+    };
     let mut x = rect.min.x + 13.0;
     if let Some(i) = icon {
         paint_icon(
@@ -203,7 +207,7 @@ pub fn primary_button(
             Align2::RIGHT_CENTER,
             sc,
             sc_font,
-            Color32::from_white_alpha(150),
+            crate::theme::on_accent().gamma_multiply(0.6),
         );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -218,11 +222,11 @@ pub fn secondary_button(ui: &mut Ui, icon: Option<Icon>, label: &str) -> Respons
     ui.painter().rect(
         rect,
         CornerRadius::same(7),
-        mix(t::BG_ELEVATED, t::BG_ELEVATED_2, h),
-        Stroke::new(1.0, mix(t::BORDER, t::BORDER_STRONG, h)),
+        mix(t::BG_ELEVATED(), t::BG_ELEVATED_2(), h),
+        Stroke::new(1.0, mix(t::BORDER(), t::BORDER_STRONG(), h)),
         egui::StrokeKind::Inside,
     );
-    let fg = mix(t::TEXT_1, t::TEXT, h);
+    let fg = mix(t::TEXT_1(), t::TEXT(), h);
     let mut x = rect.min.x + 12.0;
     if let Some(i) = icon {
         paint_icon(
@@ -250,14 +254,14 @@ pub fn ghost_button(ui: &mut Ui, icon: Icon, label: &str, shortcut: Option<&str>
         icon,
         label,
         shortcut,
-        mix(t::TEXT_2, t::TEXT_1, 0.0),
+        mix(t::TEXT_2(), t::TEXT_1(), 0.0),
         false,
     )
 }
 
 /// The primary "new" row: same shape as the others, accent icon.
 pub fn new_row(ui: &mut Ui, label: &str, shortcut: Option<&str>) -> Response {
-    nav_row(ui, Icon::Plus, label, shortcut, t::ACCENT_HOVER, true)
+    nav_row(ui, Icon::Plus, label, shortcut, t::ACCENT_HOVER(), true)
 }
 
 fn nav_row(
@@ -273,17 +277,17 @@ fn nav_row(
     ui.painter().rect_filled(
         rect,
         CornerRadius::same(6),
-        mix(Color32::TRANSPARENT, t::HOVER, h),
+        mix(Color32::TRANSPARENT, t::HOVER(), h),
     );
     let text_col = if strong {
-        t::TEXT
+        t::TEXT()
     } else {
-        mix(t::TEXT_2, t::TEXT, h)
+        mix(t::TEXT_2(), t::TEXT(), h)
     };
     let ic = if strong {
         icon_col
     } else {
-        mix(t::TEXT_3, t::TEXT_1, h)
+        mix(t::TEXT_3(), t::TEXT_1(), h)
     };
     paint_icon(
         ui,
@@ -306,7 +310,7 @@ fn nav_row(
             Align2::RIGHT_CENTER,
             sc,
             FontId::proportional(11.0),
-            t::TEXT_3.gamma_multiply(h),
+            t::TEXT_3().gamma_multiply(h),
         );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -321,7 +325,7 @@ pub fn section_header(ui: &mut Ui, title: &str, count: Option<usize>, badge_colo
         ui.label(
             egui::RichText::new(title.to_uppercase())
                 .size(10.5)
-                .color(t::TEXT_3),
+                .color(t::TEXT_3()),
         );
         if let Some(n) = count.filter(|n| *n > 0) {
             ui.label(
@@ -352,7 +356,7 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
 
 /// Session state as a coloured dot and a quiet label ("● Working").
 pub fn state_pill(ui: &mut Ui, label: &str, color: Color32) -> Response {
-    dot_label(ui, label, color, t::TEXT_2)
+    dot_label(ui, label, color, t::TEXT_2())
 }
 
 /// A small coloured dot followed by text.
@@ -373,19 +377,19 @@ pub fn dot_label(ui: &mut Ui, label: &str, dot: Color32, text: Color32) -> Respo
 /// Keycap for shortcut hints.
 pub fn kbd(ui: &mut Ui, text: &str) {
     let font = FontId::proportional(11.0);
-    let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, t::TEXT_2));
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, t::TEXT_2()));
     let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 10.0, 18.0), Sense::hover());
     ui.painter().rect(
         rect,
         CornerRadius::same(5),
-        t::BG_ELEVATED_2,
-        Stroke::new(1.0, t::BORDER),
+        t::BG_ELEVATED_2(),
+        Stroke::new(1.0, t::BORDER()),
         egui::StrokeKind::Inside,
     );
     ui.painter().galley(
         pos2(rect.min.x + 5.0, rect.center().y - galley.size().y / 2.0),
         galley,
-        t::TEXT_2,
+        t::TEXT_2(),
     );
 }
 
@@ -394,7 +398,7 @@ pub fn meter(ui: &mut Ui, frac: f32, color: Color32, width: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
     let bar = Rect::from_center_size(rect.center(), vec2(width, 4.0));
     ui.painter()
-        .rect_filled(bar, CornerRadius::same(2), t::BORDER);
+        .rect_filled(bar, CornerRadius::same(2), t::BORDER());
     let mut fill = bar;
     fill.set_width(bar.width() * frac.clamp(0.0, 1.0));
     ui.painter().rect_filled(fill, CornerRadius::same(2), color);
@@ -412,9 +416,9 @@ pub fn toggle_switch(ui: &mut Ui, on: &mut bool) -> Response {
         .ctx()
         .animate_bool_with_time(resp.id.with("knob"), *on, 0.16);
     let h = hover_t(ui, &resp);
-    let off = mix(t::BORDER_STRONG, Color32::from_rgb(0x4a, 0x4b, 0x54), h);
+    let off = mix(t::BORDER_STRONG(), Color32::from_rgb(0x4a, 0x4b, 0x54), h);
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(10), mix(off, t::ACCENT, k));
+        .rect_filled(rect, CornerRadius::same(10), mix(off, t::ACCENT(), k));
     let x = egui::lerp((rect.min.x + 10.0)..=(rect.max.x - 10.0), k);
     ui.painter().circle_filled(
         pos2(x, rect.center().y + 0.6),
@@ -436,13 +440,13 @@ pub fn settings_group(ui: &mut Ui, title: Option<&str>, add: impl FnOnce(&mut Ui
             egui::RichText::new(title)
                 .size(12.0)
                 .strong()
-                .color(t::TEXT_2),
+                .color(t::TEXT_2()),
         );
         ui.add_space(6.0);
     }
     egui::Frame::new()
-        .fill(t::BG_ELEVATED)
-        .stroke(Stroke::new(1.0, t::BORDER))
+        .fill(t::BG_ELEVATED())
+        .stroke(Stroke::new(1.0, t::BORDER()))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(egui::Margin::symmetric(14, 0))
         .show(ui, |ui| {
@@ -467,7 +471,7 @@ pub fn setting_row<R>(
         let r = ui.max_rect();
         ui.painter().line_segment(
             [pos2(r.min.x, y), pos2(r.max.x, y)],
-            Stroke::new(1.0, t::BORDER),
+            Stroke::new(1.0, t::BORDER()),
         );
     }
     let h = if detail.is_empty() { 42.0 } else { 54.0 };
@@ -482,9 +486,9 @@ pub fn setting_row<R>(
                 // Centre the text block: 17 pt label, 2 gap, 15 pt detail.
                 let block = if detail.is_empty() { 17.0 } else { 34.0 };
                 ui.add_space(((h - block) / 2.0).max(0.0));
-                ui.label(egui::RichText::new(label).size(13.0).color(t::TEXT));
+                ui.label(egui::RichText::new(label).size(13.0).color(t::TEXT()));
                 if !detail.is_empty() {
-                    ui.label(egui::RichText::new(detail).size(11.5).color(t::TEXT_3));
+                    ui.label(egui::RichText::new(detail).size(11.5).color(t::TEXT_3()));
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control)
@@ -499,20 +503,20 @@ pub fn nav_item(ui: &mut Ui, icon: Icon, label: &str, active: bool) -> Response 
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
     let h = hover_t(ui, &resp);
     let bg = if active {
-        t::ACTIVE
+        t::ACTIVE()
     } else {
-        mix(Color32::TRANSPARENT, t::HOVER, h)
+        mix(Color32::TRANSPARENT, t::HOVER(), h)
     };
     ui.painter().rect_filled(rect, CornerRadius::same(7), bg);
     let fg = if active {
-        t::TEXT
+        t::TEXT()
     } else {
-        mix(t::TEXT_1, t::TEXT, h)
+        mix(t::TEXT_1(), t::TEXT(), h)
     };
     let ic = if active {
-        t::ACCENT_HOVER
+        t::ACCENT_HOVER()
     } else {
-        mix(t::TEXT_2, t::TEXT, h)
+        mix(t::TEXT_2(), t::TEXT(), h)
     };
     paint_icon(
         ui,
@@ -541,8 +545,8 @@ pub fn stepper(
     ui.painter().rect(
         rect,
         CornerRadius::same(7),
-        t::BG_ELEVATED_2,
-        Stroke::new(1.0, t::BORDER),
+        t::BG_ELEVATED_2(),
+        Stroke::new(1.0, t::BORDER()),
         egui::StrokeKind::Inside,
     );
     let mut changed = false;
@@ -560,14 +564,14 @@ pub fn stepper(
         ui.painter().rect_filled(
             r.shrink(2.0),
             CornerRadius::same(5),
-            mix(Color32::TRANSPARENT, t::HOVER, h),
+            mix(Color32::TRANSPARENT, t::HOVER(), h),
         );
         ui.painter().text(
             r.center(),
             Align2::CENTER_CENTER,
             glyph,
             FontId::proportional(15.0),
-            mix(t::TEXT_2, t::TEXT, h),
+            mix(t::TEXT_2(), t::TEXT(), h),
         );
         if resp
             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -582,7 +586,7 @@ pub fn stepper(
         Align2::CENTER_CENTER,
         format!("{}{unit}", *value as i32),
         FontId::proportional(12.5),
-        t::TEXT,
+        t::TEXT(),
     );
     changed
 }
@@ -614,7 +618,7 @@ pub fn account_header(
     ui.painter().rect_filled(
         rect,
         CornerRadius::same(6),
-        mix(Color32::TRANSPARENT, t::HOVER, h),
+        mix(Color32::TRANSPARENT, t::HOVER(), h),
     );
     let c = avatar_color(index);
     ui.painter()
@@ -624,14 +628,14 @@ pub fn account_header(
         Align2::LEFT_CENTER,
         label,
         FontId::proportional(11.5),
-        mix(t::TEXT_2, t::TEXT, h),
+        mix(t::TEXT_2(), t::TEXT(), h),
     );
     ui.painter().text(
         pos2(name.max.x + 7.0, rect.center().y),
         Align2::LEFT_CENTER,
         count.to_string(),
         FontId::proportional(11.5),
-        t::TEXT_3,
+        t::TEXT_3(),
     );
     let right = pos2(rect.max.x - 10.0, rect.center().y);
     if in_use {
@@ -648,7 +652,7 @@ pub fn account_header(
             Align2::RIGHT_CENTER,
             "Switch",
             FontId::proportional(11.0),
-            t::TEXT_2.gamma_multiply(h),
+            t::TEXT_2().gamma_multiply(h),
         );
     }
     if in_use {
@@ -681,12 +685,16 @@ pub fn send_button(ui: &mut Ui, enabled: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), sense);
     let h = hover_t(ui, &resp);
     let fill = if enabled {
-        mix(t::ACCENT, t::ACCENT_HOVER, h)
+        mix(t::ACCENT(), t::ACCENT_HOVER(), h)
     } else {
-        t::BG_ELEVATED_2
+        t::BG_ELEVATED_2()
     };
     ui.painter().circle_filled(rect.center(), 14.0, fill);
-    let fg = if enabled { Color32::WHITE } else { t::TEXT_3 };
+    let fg = if enabled {
+        crate::theme::on_accent()
+    } else {
+        t::TEXT_3()
+    };
     paint_icon(ui, rect.shrink(7.5), Icon::Send, fg);
     let resp = resp.on_hover_text("Send (Enter)");
     if enabled {
@@ -713,9 +721,9 @@ pub fn row(ui: &mut Ui, spec: RowSpec<'_>) -> Response {
     let h = hover_t(ui, &resp);
     let painter = ui.painter_at(rect);
     let bg = if spec.active {
-        t::ACTIVE
+        t::ACTIVE()
     } else {
-        mix(Color32::TRANSPARENT, t::HOVER, h)
+        mix(Color32::TRANSPARENT, t::HOVER(), h)
     };
     painter.rect_filled(rect, CornerRadius::same(6), bg);
     if let Some(a) = spec.accent {
@@ -736,9 +744,9 @@ pub fn row(ui: &mut Ui, spec: RowSpec<'_>) -> Response {
             Rect::from_center_size(icon_c, vec2(14.0, 14.0)),
             i,
             if spec.active {
-                t::TEXT_1
+                t::TEXT_1()
             } else {
-                mix(t::TEXT_3, t::TEXT_2, h)
+                mix(t::TEXT_3(), t::TEXT_2(), h)
             },
         ),
         None => {
@@ -751,7 +759,7 @@ pub fn row(ui: &mut Ui, spec: RowSpec<'_>) -> Response {
         .map(|s| text_w(ui, s, FontId::proportional(11.0)) + 10.0)
         .unwrap_or(0.0);
     let max_w = (rect.max.x - text_x - 10.0 - trailing_w).max(20.0);
-    let title_col = if spec.active { t::TEXT } else { t::TEXT_1 };
+    let title_col = if spec.active { t::TEXT() } else { t::TEXT_1() };
     let title = elide(ui, spec.title, FontId::proportional(12.5), title_col, max_w);
     painter.galley(pos2(text_x, rect.min.y + 5.0), title, title_col);
     // Status dot leads the subtitle ("● Waiting for you · ~/app").
@@ -765,17 +773,17 @@ pub fn row(ui: &mut Ui, spec: RowSpec<'_>) -> Response {
         ui,
         spec.subtitle,
         FontId::proportional(11.0),
-        t::TEXT_3,
+        t::TEXT_3(),
         max_w + trailing_w - (sub_x - text_x),
     );
-    painter.galley(pos2(sub_x, rect.min.y + 22.0), sub, t::TEXT_3);
+    painter.galley(pos2(sub_x, rect.min.y + 22.0), sub, t::TEXT_3());
     if let Some(tr) = spec.trailing {
         painter.text(
             pos2(rect.max.x - 10.0, rect.min.y + 13.0),
             Align2::RIGHT_CENTER,
             tr,
             FontId::proportional(11.0),
-            t::TEXT_3,
+            t::TEXT_3(),
         );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -802,8 +810,8 @@ pub fn elide(
 /// Rounded card frame for floating surfaces (palette, dialogs, toasts).
 pub fn floating_frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(t::BG_ELEVATED)
-        .stroke(Stroke::new(1.0, t::BORDER_STRONG))
+        .fill(t::BG_ELEVATED())
+        .stroke(Stroke::new(1.0, t::BORDER_STRONG()))
         .corner_radius(CornerRadius::same(14))
         .inner_margin(egui::Margin::same(12))
         .shadow(egui::Shadow {

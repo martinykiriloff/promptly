@@ -301,6 +301,8 @@ pub struct App {
     terminal_font: String,
     /// Draw the terminal font's ligatures.
     ligatures: bool,
+    /// Color theme (theme::all() names).
+    theme_name: String,
     /// Installed monospace families, loaded when Settings first needs them.
     mono_families: Arc<Mutex<Option<Vec<String>>>>,
     /// Name typed in the "Add account" sheet, while it is open.
@@ -341,6 +343,7 @@ impl App {
         let (cfg, cfg_error) = Config::load();
         let early = Prefs::load();
         crate::fonts::install(&ctx, &early.terminal_font);
+        theme::set(&early.theme);
         theme::apply_chrome(&ctx, false);
         let _ = shell_integration::install();
         let (tx, rx) = mpsc::channel();
@@ -468,6 +471,7 @@ impl App {
             ai_model: "sonnet".into(),
             terminal_font: crate::fonts::BUILTIN.into(),
             ligatures: true,
+            theme_name: theme::DEFAULT.into(),
             mono_families: Arc::default(),
             add_account: None,
             accounts_checked: Instant::now(),
@@ -508,6 +512,7 @@ impl App {
         app.ai_model = prefs.ai_model.clone();
         app.terminal_font = prefs.terminal_font.clone();
         app.ligatures = prefs.ligatures;
+        app.theme_name = theme::current().name.to_string();
         {
             let known = app.known_commands.clone();
             let shell = shell_integration::user_shell(app.cfg.shell.as_deref());
@@ -1629,9 +1634,9 @@ impl App {
             rect,
             egui::CornerRadius::same(7),
             if open {
-                t::ACTIVE
+                t::ACTIVE()
             } else {
-                kit::mix(Color32::TRANSPARENT, t::HOVER, h)
+                kit::mix(Color32::TRANSPARENT, t::HOVER(), h)
             },
         );
         kit::paint_avatar(
@@ -1647,19 +1652,19 @@ impl App {
             ui,
             &active.label(),
             FontId::proportional(12.5),
-            t::TEXT,
+            t::TEXT(),
             max_w,
         );
         ui.painter()
-            .galley(egui::pos2(text_x, rect.min.y + 4.0), title, t::TEXT);
+            .galley(egui::pos2(text_x, rect.min.y + 4.0), title, t::TEXT());
         let sub = match (&active.org, active.signed_in()) {
             (Some(o), _) => o.clone(),
             (None, true) => "Personal".to_string(),
             (None, false) => "Not signed in".to_string(),
         };
-        let sub = kit::elide(ui, &sub, FontId::proportional(11.0), t::TEXT_3, max_w);
+        let sub = kit::elide(ui, &sub, FontId::proportional(11.0), t::TEXT_3(), max_w);
         ui.painter()
-            .galley(egui::pos2(text_x, rect.min.y + 21.0), sub, t::TEXT_3);
+            .galley(egui::pos2(text_x, rect.min.y + 21.0), sub, t::TEXT_3());
         kit::paint_icon(
             ui,
             egui::Rect::from_center_size(
@@ -1667,7 +1672,7 @@ impl App {
                 egui::vec2(14.0, 14.0),
             ),
             Icon::ChevronsUpDown,
-            kit::mix(t::TEXT_3, t::TEXT_1, h),
+            kit::mix(t::TEXT_3(), t::TEXT_1(), h),
         );
         let sc = self.sc(Action::SwitchAccount);
         let resp = resp
@@ -1688,7 +1693,7 @@ impl App {
                 RichText::new("Claude accounts")
                     .size(11.5)
                     .strong()
-                    .color(t::TEXT_3),
+                    .color(t::TEXT_3()),
             );
             ui.add_space(2.0);
             for (i, (a, pct)) in accounts.iter().zip(&five).enumerate() {
@@ -1698,7 +1703,7 @@ impl App {
                         RichText::new("Local models")
                             .size(11.5)
                             .strong()
-                            .color(t::TEXT_3),
+                            .color(t::TEXT_3()),
                     );
                     ui.add_space(2.0);
                 }
@@ -1710,7 +1715,7 @@ impl App {
                 ui.painter().rect_filled(
                     r,
                     egui::CornerRadius::same(7),
-                    kit::mix(Color32::TRANSPARENT, t::HOVER, h),
+                    kit::mix(Color32::TRANSPARENT, t::HOVER(), h),
                 );
                 kit::paint_avatar(
                     ui,
@@ -1721,12 +1726,12 @@ impl App {
                 );
                 let x = r.min.x + 36.0;
                 let w = r.max.x - x - 56.0;
-                let g = kit::elide(ui, &a.label(), FontId::proportional(13.0), t::TEXT, w);
+                let g = kit::elide(ui, &a.label(), FontId::proportional(13.0), t::TEXT(), w);
                 ui.painter()
-                    .galley(egui::pos2(x, r.min.y + 5.0), g, t::TEXT);
-                let g = kit::elide(ui, &a.detail(), FontId::proportional(11.0), t::TEXT_3, w);
+                    .galley(egui::pos2(x, r.min.y + 5.0), g, t::TEXT());
+                let g = kit::elide(ui, &a.detail(), FontId::proportional(11.0), t::TEXT_3(), w);
                 ui.painter()
-                    .galley(egui::pos2(x, r.min.y + 23.0), g, t::TEXT_3);
+                    .galley(egui::pos2(x, r.min.y + 23.0), g, t::TEXT_3());
                 if a.id == active.id {
                     kit::paint_icon(
                         ui,
@@ -1735,7 +1740,7 @@ impl App {
                             egui::vec2(14.0, 14.0),
                         ),
                         Icon::Check,
-                        t::ACCENT_HOVER,
+                        t::ACCENT_HOVER(),
                     );
                 }
                 if let Some(p) = pct {
@@ -1744,7 +1749,7 @@ impl App {
                         egui::Align2::RIGHT_CENTER,
                         format!("{p:.0}%"),
                         FontId::proportional(11.0),
-                        t::TEXT_3,
+                        t::TEXT_3(),
                     );
                 }
                 let tip = format!("{}\nFolder: {}", a.label(), a.dir.display());
@@ -1788,10 +1793,10 @@ impl App {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
                     ui.painter()
-                        .rect_filled(r, egui::CornerRadius::same(8), t::ACCENT.gamma_multiply(0.18));
-                    kit::paint_icon(ui, r.shrink(8.0), Icon::UserPlus, t::ACCENT_HOVER);
+                        .rect_filled(r, egui::CornerRadius::same(8), t::ACCENT().gamma_multiply(0.18));
+                    kit::paint_icon(ui, r.shrink(8.0), Icon::UserPlus, t::ACCENT_HOVER());
                     ui.add_space(4.0);
-                    ui.label(RichText::new("Add a Claude account").size(16.0).strong().color(t::TEXT));
+                    ui.label(RichText::new("Add a Claude account").size(16.0).strong().color(t::TEXT()));
                 });
                 ui.add_space(8.0);
                 ui.label(
@@ -1799,10 +1804,10 @@ impl App {
                         "Each account gets its own Claude Code folder and sign-in. A new session opens so you can log in.",
                     )
                     .size(12.5)
-                    .color(t::TEXT_2),
+                    .color(t::TEXT_2()),
                 );
                 ui.add_space(14.0);
-                ui.label(RichText::new("Name").size(12.0).color(t::TEXT_2));
+                ui.label(RichText::new("Name").size(12.0).color(t::TEXT_2()));
                 ui.add_space(4.0);
                 let edit = egui::TextEdit::singleline(&mut name)
                     .hint_text("work, client, side project…")
@@ -1833,7 +1838,7 @@ impl App {
                 ui.label(
                     RichText::new(hint)
                         .size(11.5)
-                        .color(if exists { theme::AMBER } else { t::TEXT_3 }),
+                        .color(if exists { theme::AMBER() } else { t::TEXT_3() }),
                 );
                 ui.add_space(18.0);
                 let ok = !slug.is_empty() && !exists;
@@ -1927,7 +1932,7 @@ impl App {
         let ranked = c.attention.ranked();
         if !ranked.is_empty() {
             ui.add_space(8.0);
-            kit::section_header(ui, "Needs you", Some(ranked.len()), theme::AMBER);
+            kit::section_header(ui, "Needs you", Some(ranked.len()), theme::AMBER());
             for item in ranked {
                 let Some(m) = c.sessions.get(&item.session) else {
                     continue;
@@ -1962,7 +1967,7 @@ impl App {
         }
 
         ui.add_space(8.0);
-        kit::section_header(ui, "Sessions", Some(c.sessions.len()), theme::MUTED);
+        kit::section_header(ui, "Sessions", Some(c.sessions.len()), theme::MUTED());
         let footer_h = 44.0;
         let list_h = (ui.available_height() - footer_h).max(60.0);
         // Sessions in tab order, grouped under their account when there is
@@ -2191,6 +2196,7 @@ impl App {
             ai_model: self.ai_model.clone(),
             terminal_font: self.terminal_font.clone(),
             ligatures: self.ligatures,
+            theme: self.theme_name.clone(),
         }
         .save();
     }
@@ -2219,14 +2225,14 @@ impl App {
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::hover());
         ui.painter().line_segment(
             [hrect.left_bottom(), hrect.right_bottom()],
-            egui::Stroke::new(1.0, t::BORDER),
+            egui::Stroke::new(1.0, t::BORDER()),
         );
         let mut h = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(hrect.shrink2(egui::vec2(12.0, 0.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        h.label(RichText::new("Thinking").size(14.0).color(t::TEXT));
+        h.label(RichText::new("Thinking").size(14.0).color(t::TEXT()));
         if working {
             let phase = if self.reduce_motion {
                 1.0
@@ -2242,7 +2248,7 @@ impl App {
             &h,
             &name,
             egui::FontId::proportional(12.0),
-            t::TEXT_3,
+            t::TEXT_3(),
             h.available_width() - 40.0,
         );
         h.label(g);
@@ -2257,7 +2263,8 @@ impl App {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    RichText::new("Select a Claude session to see its thinking.").color(t::TEXT_3),
+                    RichText::new("Select a Claude session to see its thinking.")
+                        .color(t::TEXT_3()),
                 );
             });
             return;
@@ -2266,13 +2273,13 @@ impl App {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
                 ui.set_max_width(300.0);
-                ui.label(RichText::new("Nothing yet").size(15.0).color(t::TEXT_1));
+                ui.label(RichText::new("Nothing yet").size(15.0).color(t::TEXT_1()));
                 ui.label(
                     RichText::new(
                         "Claude's reasoning appears here as it works, alongside the tools it runs.",
                     )
                     .size(12.5)
-                    .color(t::TEXT_3),
+                    .color(t::TEXT_3()),
                 );
             });
             return;
@@ -2292,7 +2299,7 @@ impl App {
                                 RichText::new(if *n == 1 { "Thought without a summary".to_string() } else { format!("Thought {n} times without a summary") })
                                     .size(12.0)
                                     .italics()
-                                    .color(t::TEXT_3),
+                                    .color(t::TEXT_3()),
                             )
                             .on_hover_text("This model or Claude Code version didn't include the thinking text in the transcript.");
                             ui.add_space(6.0);
@@ -2309,13 +2316,13 @@ impl App {
                             StepKind::Prompt => {
                                 ui.add_space(8.0);
                                 egui::Frame::new()
-                                    .fill(t::BG_ELEVATED)
+                                    .fill(t::BG_ELEVATED())
                                     .corner_radius(egui::CornerRadius::same(10))
                                     .inner_margin(egui::Margin::symmetric(12, 8))
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
-                                        ui.label(RichText::new("You").size(11.5).color(t::TEXT_3));
-                                        ui.label(RichText::new(sanitize::one_line(&s.text, 400)).size(13.0).color(t::TEXT));
+                                        ui.label(RichText::new("You").size(11.5).color(t::TEXT_3()));
+                                        ui.label(RichText::new(sanitize::one_line(&s.text, 400)).size(13.0).color(t::TEXT()));
                                     });
                                 ui.add_space(8.0);
                             }
@@ -2325,7 +2332,7 @@ impl App {
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
                                         ui.label(RichText::new("Thinking").size(11.5).color(lavender));
-                                        ui.label(RichText::new(&s.text).size(13.0).italics().color(t::TEXT_1));
+                                        ui.label(RichText::new(&s.text).size(13.0).italics().color(t::TEXT_1()));
                                     })
                                     .response;
                                 let r = resp.rect;
@@ -2339,20 +2346,20 @@ impl App {
                             StepKind::Tool => {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
-                                    ui.label(RichText::new("⏺").size(11.0).color(theme::GREEN));
-                                    ui.add(egui::Label::new(RichText::new(&s.text).monospace().size(12.0).color(t::TEXT_2)).truncate());
+                                    ui.label(RichText::new("⏺").size(11.0).color(theme::GREEN()));
+                                    ui.add(egui::Label::new(RichText::new(&s.text).monospace().size(12.0).color(t::TEXT_2())).truncate());
                                 });
                                 ui.add_space(4.0);
                             }
                             StepKind::Reply => {
                                 ui.add_space(4.0);
-                                ui.label(RichText::new("Claude").size(11.5).color(t::TEXT_3));
+                                ui.label(RichText::new("Claude").size(11.5).color(t::TEXT_3()));
                                 let text = if s.text.chars().count() > 900 {
                                     format!("{}…", s.text.chars().take(900).collect::<String>())
                                 } else {
                                     s.text.clone()
                                 };
-                                ui.label(RichText::new(text).size(13.0).color(t::TEXT_1));
+                                ui.label(RichText::new(text).size(13.0).color(t::TEXT_1()));
                                 ui.add_space(8.0);
                             }
                             StepKind::ThinkingHidden => {}
@@ -2375,7 +2382,7 @@ impl App {
         let Some((cwd, seq, baselines)) = target else {
             ui.add_space(48.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new("No session selected").color(theme::tokens::TEXT_3));
+                ui.label(RichText::new("No session selected").color(theme::tokens::TEXT_3()));
             });
             return;
         };
@@ -2408,29 +2415,29 @@ impl App {
             UpdateState::Available(r) => (
                 format!("Update available · v{}", r.version()),
                 String::new(),
-                t::ACCENT_HOVER,
+                t::ACCENT_HOVER(),
             ),
-            UpdateState::Working(msg) => ("Updating Promptly".into(), msg.clone(), theme::BLUE),
+            UpdateState::Working(msg) => ("Updating Promptly".into(), msg.clone(), theme::BLUE()),
             UpdateState::Ready { version, .. } => (
                 format!("v{version} installed"),
                 "Restart to finish. Sessions are offered back on launch.".into(),
-                theme::GREEN,
+                theme::GREEN(),
             ),
-            UpdateState::Failed(e) => ("Update failed".into(), e.clone(), theme::RED),
+            UpdateState::Failed(e) => ("Update failed".into(), e.clone(), theme::RED()),
             UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate => return None,
         };
         ui.add_space(8.0);
         egui::Frame::new()
-            .fill(t::BG_ELEVATED)
-            .stroke(egui::Stroke::new(1.0, t::BORDER))
+            .fill(t::BG_ELEVATED())
+            .stroke(egui::Stroke::new(1.0, t::BORDER()))
             .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.set_width(ui.available_width());
-                    kit::dot_label(ui, &title, tone, t::TEXT);
+                    kit::dot_label(ui, &title, tone, t::TEXT());
                     if !body.is_empty() {
-                        ui.label(RichText::new(body).size(11.0).color(t::TEXT_3));
+                        ui.label(RichText::new(body).size(11.0).color(t::TEXT_3()));
                     }
                     ui.add_space(6.0);
                     match &state {
@@ -2536,7 +2543,7 @@ impl App {
                     ui.label(
                         RichText::new(&acct_label)
                             .font(font.clone())
-                            .color(t::TEXT_2),
+                            .color(t::TEXT_2()),
                     );
                 })
                 .response
@@ -2551,7 +2558,7 @@ impl App {
                 ui.label(
                     RichText::new("·")
                         .font(FontId::proportional(11.5))
-                        .color(t::TEXT_3),
+                        .color(t::TEXT_3()),
                 );
                 ui.add_space(10.0);
             };
@@ -2568,7 +2575,7 @@ impl App {
                     ui.label(
                         RichText::new(kit::state_label(*st))
                             .font(font.clone())
-                            .color(t::TEXT_2),
+                            .color(t::TEXT_2()),
                     );
                 }
             }
@@ -2594,7 +2601,7 @@ impl App {
                                         );
                                         let (_, col) = charts::limit_level(w.used_percentage);
                                         let col = if w.used_percentage < 70.0 {
-                                            t::TEXT_2
+                                            t::TEXT_2()
                                         } else {
                                             col
                                         };
@@ -2612,7 +2619,7 @@ impl App {
                                             r.center(),
                                             egui::vec2(36.0, 3.0),
                                         );
-                                        ui.painter().rect_filled(bar, 1.5, t::BORDER_STRONG);
+                                        ui.painter().rect_filled(bar, 1.5, t::BORDER_STRONG());
                                         let mut f = bar;
                                         f.set_width(bar.width() * (pct / 100.0).clamp(0.0, 1.0));
                                         ui.painter().rect_filled(f, 1.5, col);
@@ -2620,18 +2627,20 @@ impl App {
                                         ui.label(
                                             RichText::new(label)
                                                 .font(font.clone())
-                                                .color(t::TEXT_3),
+                                                .color(t::TEXT_3()),
                                         );
                                     }
                                     None => {
                                         ui.label(
-                                            RichText::new("—").font(font.clone()).color(t::TEXT_3),
+                                            RichText::new("—")
+                                                .font(font.clone())
+                                                .color(t::TEXT_3()),
                                         );
                                         ui.add_space(6.0);
                                         ui.label(
                                             RichText::new(label)
                                                 .font(font.clone())
-                                                .color(t::TEXT_3),
+                                                .color(t::TEXT_3()),
                                         );
                                     }
                                 }
@@ -2644,7 +2653,7 @@ impl App {
                                 ui.label(
                                     RichText::new(format!("${burn:.2}/h"))
                                         .font(font.clone())
-                                        .color(t::TEXT_2),
+                                        .color(t::TEXT_2()),
                                 );
                             }
                             if let Some((true, _, _, _, ctx, cost)) = &session {
@@ -2653,12 +2662,16 @@ impl App {
                                     ui.label(
                                         RichText::new(format!("${c:.2}"))
                                             .font(font.clone())
-                                            .color(t::TEXT_2),
+                                            .color(t::TEXT_2()),
                                     );
                                 }
                                 if let Some(p) = ctx {
                                     ui.add_space(16.0);
-                                    let col = if *p >= 80.0 { theme::AMBER } else { t::TEXT_2 };
+                                    let col = if *p >= 80.0 {
+                                        theme::AMBER()
+                                    } else {
+                                        t::TEXT_2()
+                                    };
                                     ui.label(
                                         RichText::new(format!("{p:.0}%"))
                                             .font(font.clone())
@@ -2668,7 +2681,7 @@ impl App {
                                     ui.label(
                                         RichText::new("context")
                                             .font(font.clone())
-                                            .color(t::TEXT_3),
+                                            .color(t::TEXT_3()),
                                     );
                                 }
                             }
@@ -2686,7 +2699,7 @@ impl App {
                                 ui.painter().circle_filled(
                                     d.center(),
                                     3.0,
-                                    theme::GREEN.gamma_multiply(phase),
+                                    theme::GREEN().gamma_multiply(phase),
                                 );
                                 ui.ctx().request_repaint_after(Duration::from_millis(50));
                             }
@@ -2773,15 +2786,15 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Frame::new().inner_margin(egui::Margin { left: 24, right: 24, top: 14, bottom: 24 }).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Usage").size(20.0).color(t::TEXT));
+                    ui.label(RichText::new("Usage").size(20.0).color(t::TEXT()));
                     if let Some(tag) = &account_tag {
-                        ui.label(RichText::new(tag).size(14.0).color(t::TEXT_3));
+                        ui.label(RichText::new(tag).size(14.0).color(t::TEXT_3()));
                     }
                     let note = match observed {
                         Some(o) => format!("Live from Claude Code · updated {} ago", fmt_until(now - o)),
                         None => "Start a Claude session to receive plan limits".into(),
                     };
-                    ui.label(RichText::new(note).size(12.0).color(t::TEXT_3));
+                    ui.label(RichText::new(note).size(12.0).color(t::TEXT_3()));
                 });
                 ui.add_space(14.0);
 
@@ -2795,27 +2808,27 @@ impl App {
                         ("Weekly limit", week, &week_hist, 7.0 * 86_400.0),
                     ] {
                         egui::Frame::new()
-                            .fill(t::BG_SIDEBAR)
-                            .stroke(egui::Stroke::new(1.0, t::BORDER))
+                            .fill(t::BG_SIDEBAR())
+                            .stroke(egui::Stroke::new(1.0, t::BORDER()))
                             .corner_radius(egui::CornerRadius::same(12))
                             .inner_margin(egui::Margin::same(16))
                             .show(ui, |ui| {
                                 ui.vertical(|ui| {
                                 ui.set_width(half - 34.0);
-                                ui.label(RichText::new(label).size(12.5).color(t::TEXT_2));
+                                ui.label(RichText::new(label).size(12.5).color(t::TEXT_2()));
                                 match w {
                                     Some(w) => {
                                         let pct = charts::tween(ui, ("big", label), w.used_percentage, reduce);
                                         let (level, color) = charts::limit_level(w.used_percentage);
                                         ui.horizontal(|ui| {
-                                            ui.label(RichText::new(format!("{pct:.0}%")).size(34.0).color(t::TEXT));
+                                            ui.label(RichText::new(format!("{pct:.0}%")).size(34.0).color(t::TEXT()));
                                             ui.vertical(|ui| {
                                                 ui.add_space(8.0);
                                                 ui.label(RichText::new(level).size(12.0).color(color));
-                                                ui.label(RichText::new("used").size(11.5).color(t::TEXT_3));
+                                                ui.label(RichText::new("used").size(11.5).color(t::TEXT_3()));
                                             });
                                         });
-                                        let fill = if level == "OK" { t::TEXT_2 } else { color };
+                                        let fill = if level == "OK" { t::TEXT_2() } else { color };
                                         charts::limit_bar(ui, pct / 100.0, fill, ui.available_width());
                                         ui.add_space(6.0);
                                         let at = chrono::DateTime::from_timestamp(w.resets_at, 0)
@@ -2824,11 +2837,11 @@ impl App {
                                         ui.label(
                                             RichText::new(format!("Resets in {} · {at}", fmt_until(w.resets_at - now)))
                                                 .size(12.0)
-                                                .color(t::TEXT_2),
+                                                .color(t::TEXT_2()),
                                         );
                                         ui.add_space(8.0);
                                         let size = egui::vec2(ui.available_width(), 56.0);
-                                        charts::sparkline(ui, hist, (nowf - span, nowf), Some(100.0), size, theme::BLUE, |x, y| {
+                                        charts::sparkline(ui, hist, (nowf - span, nowf), Some(100.0), size, theme::BLUE(), |x, y| {
                                             let at = chrono::DateTime::from_timestamp(x as i64, 0)
                                                 .map(|d| d.with_timezone(&chrono::Local).format("%a %H:%M").to_string())
                                                 .unwrap_or_default();
@@ -2836,8 +2849,8 @@ impl App {
                                         });
                                     }
                                     None => {
-                                        ui.label(RichText::new("—").size(34.0).color(t::TEXT_3));
-                                        ui.label(RichText::new("Reported by Claude Code once a session runs.").size(12.0).color(t::TEXT_3));
+                                        ui.label(RichText::new("—").size(34.0).color(t::TEXT_3()));
+                                        ui.label(RichText::new("Reported by Claude Code once a session runs.").size(12.0).color(t::TEXT_3()));
                                     }
                                 }
                                 });
@@ -2881,13 +2894,13 @@ impl App {
                 // Hourly tokens
                 if let Some(d) = &daily {
                     egui::Frame::new()
-                        .fill(t::BG_SIDEBAR)
-                        .stroke(egui::Stroke::new(1.0, t::BORDER))
+                        .fill(t::BG_SIDEBAR())
+                        .stroke(egui::Stroke::new(1.0, t::BORDER()))
                         .corner_radius(egui::CornerRadius::same(12))
                         .inner_margin(egui::Margin::same(16))
                         .show(ui, |ui| { ui.vertical(|ui| {
                             ui.set_width(full - 32.0);
-                            ui.label(RichText::new("Tokens by hour, today").size(12.5).color(t::TEXT_2));
+                            ui.label(RichText::new("Tokens by hour, today").size(12.5).color(t::TEXT_2()));
                             ui.add_space(8.0);
                             let hour = ((now - d.day_start) / 3600).clamp(0, 23) as usize;
                             charts::hourly_bars(ui, &d.by_hour, hour, egui::vec2(full - 32.0, 120.0));
@@ -2895,7 +2908,7 @@ impl App {
                                 ui.add_space(10.0);
                                 for (model, tk) in &d.by_model {
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(model).monospace().size(11.5).color(t::TEXT_1));
+                                        ui.label(RichText::new(model).monospace().size(11.5).color(t::TEXT_1()));
                                         ui.label(
                                             RichText::new(format!(
                                                 "{} in · {} out · {} cache read · {} cache write",
@@ -2905,7 +2918,7 @@ impl App {
                                                 fmt_tokens(tk.cache_write)
                                             ))
                                             .size(11.5)
-                                            .color(t::TEXT_3),
+                                            .color(t::TEXT_3()),
                                         );
                                     });
                                 }
@@ -2916,16 +2929,16 @@ impl App {
 
                 // Live sessions table
                 egui::Frame::new()
-                    .fill(t::BG_SIDEBAR)
-                    .stroke(egui::Stroke::new(1.0, t::BORDER))
+                    .fill(t::BG_SIDEBAR())
+                    .stroke(egui::Stroke::new(1.0, t::BORDER()))
                     .corner_radius(egui::CornerRadius::same(12))
                     .inner_margin(egui::Margin::same(16))
                     .show(ui, |ui| { ui.vertical(|ui| {
                         ui.set_width(full - 32.0);
-                        ui.label(RichText::new("Claude sessions").size(12.5).color(t::TEXT_2));
+                        ui.label(RichText::new("Claude sessions").size(12.5).color(t::TEXT_2()));
                         ui.add_space(6.0);
                         if rows.is_empty() {
-                            ui.label(RichText::new("No Claude sessions open").color(t::TEXT_3));
+                            ui.label(RichText::new("No Claude sessions open").color(t::TEXT_3()));
                         }
                         let cols = [0.30, 0.12, 0.11, 0.11, 0.09, 0.09, 0.18];
                         let w = full - 32.0;
@@ -2937,7 +2950,7 @@ impl App {
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
                                         ui.set_min_width(w * cols[i] - 8.0);
-                                        ui.label(RichText::new(*h).size(11.0).color(t::TEXT_3))
+                                        ui.label(RichText::new(*h).size(11.0).color(t::TEXT_3()))
                                     },
                                 );
                             }
@@ -2955,13 +2968,13 @@ impl App {
                                             },
                                         );
                                     };
-                                    cell(ui, 0, RichText::new(format!("   {}", r.name)).color(t::TEXT_1));
+                                    cell(ui, 0, RichText::new(format!("   {}", r.name)).color(t::TEXT_1()));
                                     let cost = r.cost.map(|v| charts::tween(ui, ("row-cost", r.id), v as f32, reduce));
-                                    cell(ui, 1, RichText::new(cost.map(|v| format!("${v:.2}")).unwrap_or("—".into())).color(t::TEXT));
-                                    cell(ui, 2, RichText::new(r.tokens.map(fmt_tokens).unwrap_or("—".into())).color(t::TEXT_2));
-                                    cell(ui, 3, RichText::new(r.burn.map(|b| format!("${b:.2}/h")).unwrap_or("—".into())).color(t::TEXT_2));
-                                    cell(ui, 4, RichText::new(r.ctx.map(|p| format!("{p:.0}%")).unwrap_or("—".into())).color(t::TEXT_2));
-                                    cell(ui, 5, RichText::new(format!("+{} −{}", r.lines.0, r.lines.1)).color(t::TEXT_2));
+                                    cell(ui, 1, RichText::new(cost.map(|v| format!("${v:.2}")).unwrap_or("—".into())).color(t::TEXT()));
+                                    cell(ui, 2, RichText::new(r.tokens.map(fmt_tokens).unwrap_or("—".into())).color(t::TEXT_2()));
+                                    cell(ui, 3, RichText::new(r.burn.map(|b| format!("${b:.2}/h")).unwrap_or("—".into())).color(t::TEXT_2()));
+                                    cell(ui, 4, RichText::new(r.ctx.map(|p| format!("{p:.0}%")).unwrap_or("—".into())).color(t::TEXT_2()));
+                                    cell(ui, 5, RichText::new(format!("+{} −{}", r.lines.0, r.lines.1)).color(t::TEXT_2()));
                                     let size = egui::vec2(w * cols[6] - 8.0, 22.0);
                                     charts::sparkline(ui, &r.series, (nowf - 3600.0, nowf), None, size, theme::state_color(r.state), |_, y| format!("${y:.2}"));
                                 })
@@ -2997,7 +3010,7 @@ impl App {
             window_drag_zone(ui, rect, ("pane-drag", id));
             ui.painter().line_segment(
                 [rect.left_bottom(), rect.right_bottom()],
-                egui::Stroke::new(1.0, theme::tokens::BORDER),
+                egui::Stroke::new(1.0, theme::tokens::BORDER()),
             );
             // Right-hand controls get their space first; the title side is
             // clipped to what is left, so narrow panes never overlap.
@@ -3032,7 +3045,7 @@ impl App {
                 }
                 ui.add_space(10.0);
                 ui.spacing_mut().item_spacing.x = 12.0;
-                let muted = theme::tokens::TEXT_3;
+                let muted = theme::tokens::TEXT_3();
                 if let Some(model) = m.status.model.clone().or_else(|| m.stats.model.clone()) {
                     ui.label(RichText::new(model).size(12.0).color(muted));
                 }
@@ -3040,7 +3053,7 @@ impl App {
                     Some(c) => ui.label(
                         RichText::new(format!("${c:.2}"))
                             .size(12.5)
-                            .color(theme::tokens::TEXT_2),
+                            .color(theme::tokens::TEXT_2()),
                     ),
                     None => ui.label(RichText::new("$ —").size(12.5).color(muted)),
                 }
@@ -3051,11 +3064,15 @@ impl App {
                     let label = pct
                         .map(|p| format!("{p:.0}%"))
                         .unwrap_or_else(|| "—".into());
-                    ui.label(RichText::new(label).size(12.5).color(theme::tokens::TEXT_2));
+                    ui.label(
+                        RichText::new(label)
+                            .size(12.5)
+                            .color(theme::tokens::TEXT_2()),
+                    );
                     let col = match pct {
-                        Some(p) if p > 85.0 => theme::RED,
-                        Some(p) if p > 65.0 => theme::AMBER,
-                        _ => theme::tokens::TEXT_2,
+                        Some(p) if p > 85.0 => theme::RED(),
+                        Some(p) if p > 65.0 => theme::AMBER(),
+                        _ => theme::tokens::TEXT_2(),
                     };
                     kit::meter(ui, pct.unwrap_or(0.0) / 100.0, col, 44.0);
                 })
@@ -3083,16 +3100,16 @@ impl App {
                 kit::state_pill(ui, kit::state_label(st), theme::state_color(st));
             } else {
                 let (label, col) = match (m.command_running, m.last_exit) {
-                    (true, _) => ("Running".to_string(), theme::BLUE),
-                    (false, Some(c)) if c != 0 => (format!("Exit {c}"), theme::RED),
-                    _ => ("Shell".to_string(), theme::MUTED),
+                    (true, _) => ("Running".to_string(), theme::BLUE()),
+                    (false, Some(c)) if c != 0 => (format!("Exit {c}"), theme::RED()),
+                    _ => ("Shell".to_string(), theme::MUTED()),
                 };
                 kit::state_pill(ui, &label, col);
             }
             let title_col = if is_active {
-                theme::tokens::TEXT
+                theme::tokens::TEXT()
             } else {
-                theme::tokens::TEXT_2
+                theme::tokens::TEXT_2()
             };
             ui.label(RichText::new(m.display_name()).size(13.0).color(title_col))
                 .on_hover_text(m.cwd.to_string_lossy());
@@ -3102,30 +3119,35 @@ impl App {
                     ui,
                     &tag,
                     kit::avatar_color(c.account_index(&m.account)),
-                    theme::tokens::TEXT_3,
+                    theme::tokens::TEXT_3(),
                 )
                 .on_hover_text(format!("Claude account: {label}"));
             }
             if let Some(b) = &m.branch {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                kit::paint_icon(ui, r, Icon::Branch, theme::tokens::TEXT_3);
+                kit::paint_icon(ui, r, Icon::Branch, theme::tokens::TEXT_3());
                 ui.add_space(-6.0);
                 ui.label(
                     RichText::new(b)
                         .font(FontId::monospace(11.5))
-                        .color(theme::tokens::TEXT_3),
+                        .color(theme::tokens::TEXT_3()),
                 );
             }
             if m.is_claude() && !m.hooks_injected {
-                kit::dot_label(ui, "transcript-only", theme::AMBER, theme::tokens::TEXT_3)
-                    .on_hover_text("Hooks are not injected; state is derived from the transcript.");
+                kit::dot_label(
+                    ui,
+                    "transcript-only",
+                    theme::AMBER(),
+                    theme::tokens::TEXT_3(),
+                )
+                .on_hover_text("Hooks are not injected; state is derived from the transcript.");
             }
         }
         // Callouts under the header.
         let c = self.core.lock();
         if let Some(m) = c.sessions.get(&id) {
             if m.pending_clipboard.is_some() {
-                callout(ui, theme::AMBER, |ui| {
+                callout(ui, theme::AMBER(), |ui| {
                     ui.label("This program wants to write to your clipboard.");
                     if ui.button("Allow for this session").clicked() {
                         allow_clip = Some(true);
@@ -3137,12 +3159,12 @@ impl App {
             }
             if let (SessionState::WaitingPermission, Some(d)) = (m.state(), &m.attention_detail) {
                 let d = d.clone();
-                callout(ui, theme::AMBER, |ui| {
+                callout(ui, theme::AMBER(), |ui| {
                     ui.label(
                         RichText::new("Approve in the terminal below:")
-                            .color(theme::tokens::TEXT_1),
+                            .color(theme::tokens::TEXT_1()),
                     );
-                    ui.label(RichText::new(d).monospace().color(theme::tokens::TEXT));
+                    ui.label(RichText::new(d).monospace().color(theme::tokens::TEXT()));
                 });
             }
         }
@@ -3181,8 +3203,8 @@ impl App {
             && let Some(s) = e.view.search.as_mut()
         {
             egui::Frame::new()
-                .fill(theme::tokens::BG_ELEVATED)
-                .stroke(egui::Stroke::new(1.0, theme::tokens::BORDER))
+                .fill(theme::tokens::BG_ELEVATED())
+                .stroke(egui::Stroke::new(1.0, theme::tokens::BORDER()))
                 .corner_radius(egui::CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(10, 4))
                 .outer_margin(egui::Margin::symmetric(10, 6))
@@ -3191,7 +3213,7 @@ impl App {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         let (ir, _) =
                             ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                        kit::paint_icon(ui, ir, Icon::Search, theme::tokens::TEXT_3);
+                        kit::paint_icon(ui, ir, Icon::Search, theme::tokens::TEXT_3());
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut s.query)
                                 .frame(egui::Frame::NONE)
@@ -3213,7 +3235,7 @@ impl App {
                         ui.label(
                             RichText::new(&s.status)
                                 .size(11.5)
-                                .color(theme::tokens::TEXT_3),
+                                .color(theme::tokens::TEXT_3()),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if kit::icon_button(ui, Icon::Close, "Close (Esc)", false).clicked()
@@ -3301,19 +3323,19 @@ impl App {
                 .layout(egui::Layout::top_down(egui::Align::Center)),
         );
         let (r, _) = cui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::hover());
-        kit::paint_icon(&cui, r, Icon::Sparkle, theme::tokens::ACCENT_HOVER);
+        kit::paint_icon(&cui, r, Icon::Sparkle, theme::tokens::ACCENT_HOVER());
         cui.add_space(8.0);
         cui.label(
             RichText::new("Start a session")
                 .size(20.0)
-                .color(theme::tokens::TEXT),
+                .color(theme::tokens::TEXT()),
         );
         cui.label(
             RichText::new(
                 "Run Claude Code with attention tracking, worktrees and review built in.",
             )
             .size(13.0)
-            .color(theme::tokens::TEXT_2),
+            .color(theme::tokens::TEXT_2()),
         );
         cui.add_space(16.0);
         let sc = self.sc(Action::NewClaude);
@@ -3382,7 +3404,7 @@ impl App {
                     )
                 };
                 ui.painter()
-                    .line_segment([a, b], egui::Stroke::new(1.0, theme::tokens::BORDER));
+                    .line_segment([a, b], egui::Stroke::new(1.0, theme::tokens::BORDER()));
             }
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).id_salt(("pane", *id)));
             self.pane_ui(&mut child, *id, overlay_open);
@@ -3403,7 +3425,7 @@ impl App {
             ui.label(
                 RichText::new("All sessions")
                     .size(15.0)
-                    .color(theme::tokens::TEXT),
+                    .color(theme::tokens::TEXT()),
             );
         });
         ui.add_space(8.0);
@@ -3444,13 +3466,13 @@ impl App {
                         p.rect(
                             r,
                             egui::CornerRadius::same(10),
-                            theme::tokens::BG_SIDEBAR,
+                            theme::tokens::BG_SIDEBAR(),
                             egui::Stroke::new(
                                 1.0,
                                 if hovered {
                                     theme::state_color(st)
                                 } else {
-                                    theme::tokens::BORDER
+                                    theme::tokens::BORDER()
                                 },
                             ),
                             egui::StrokeKind::Inside,
@@ -3471,7 +3493,7 @@ impl App {
                                 ui,
                                 &name,
                                 egui::FontId::proportional(13.0),
-                                theme::tokens::TEXT,
+                                theme::tokens::TEXT(),
                                 ui.available_width() - 8.0,
                             );
                             ui.label(g);
@@ -3485,16 +3507,16 @@ impl App {
                             RichText::new(sub)
                                 .size(11.5)
                                 .color(if st.needs_attention() {
-                                    theme::AMBER
+                                    theme::AMBER()
                                 } else {
-                                    theme::tokens::TEXT_3
+                                    theme::tokens::TEXT_3()
                                 }),
                         );
                         let preview = cu.available_rect_before_wrap();
                         cu.painter().rect_filled(
                             preview,
                             egui::CornerRadius::same(6),
-                            theme::tokens::BG_MAIN,
+                            theme::tokens::BG_MAIN(),
                         );
                         let mut y = preview.min.y + 6.0;
                         for l in lines {
@@ -3505,13 +3527,13 @@ impl App {
                                 &cu,
                                 &l,
                                 egui::FontId::monospace(10.5),
-                                theme::tokens::TEXT_2,
+                                theme::tokens::TEXT_2(),
                                 preview.width() - 16.0,
                             );
                             cu.painter().galley(
                                 egui::pos2(preview.min.x + 8.0, y),
                                 g,
-                                theme::tokens::TEXT_2,
+                                theme::tokens::TEXT_2(),
                             );
                             y += 14.0;
                         }
@@ -3573,7 +3595,7 @@ impl App {
                             if matches.is_empty() {
                                 ui.label(
                                     RichText::new("No matching commands")
-                                        .color(theme::tokens::TEXT_3),
+                                        .color(theme::tokens::TEXT_3()),
                                 );
                             }
                             for (i, (a, _, label, _)) in matches.iter().enumerate() {
@@ -3642,10 +3664,10 @@ impl App {
                     ui.add_space(6.0);
                     if self.index.lock().is_none() {
                         ui.label(
-                            RichText::new("Indexing transcripts…").color(theme::tokens::TEXT_3),
+                            RichText::new("Indexing transcripts…").color(theme::tokens::TEXT_3()),
                         );
                     } else if h.results.is_empty() {
-                        ui.label(RichText::new("No sessions found").color(theme::tokens::TEXT_3));
+                        ui.label(RichText::new("No sessions found").color(theme::tokens::TEXT_3()));
                     }
                     let accounts = self.core.lock().accounts.clone();
                     egui::ScrollArea::vertical()
@@ -3726,11 +3748,11 @@ impl App {
                     ui.label(
                         RichText::new("Fan out tasks")
                             .size(16.0)
-                            .color(theme::tokens::TEXT),
+                            .color(theme::tokens::TEXT()),
                     );
                     ui.label(
                         RichText::new("One task per line. Each runs in its own Claude session.")
-                            .color(theme::tokens::TEXT_2),
+                            .color(theme::tokens::TEXT_2()),
                     );
                     ui.add_space(8.0);
                     ui.add(
@@ -3744,7 +3766,7 @@ impl App {
                     ui.label(
                         RichText::new("Repository")
                             .size(12.0)
-                            .color(theme::tokens::TEXT_2),
+                            .color(theme::tokens::TEXT_2()),
                     );
                     ui.add(
                         egui::TextEdit::singleline(&mut f.cwd)
@@ -3808,7 +3830,7 @@ impl App {
                     ui.label(
                         RichText::new("Review this paste")
                             .size(16.0)
-                            .color(theme::tokens::TEXT),
+                            .color(theme::tokens::TEXT()),
                     );
                     let mut why = vec![format!("{} lines", risk.lines)];
                     if risk.control_chars > 0 {
@@ -3819,11 +3841,11 @@ impl App {
                     }
                     ui.label(
                         RichText::new(format!("Contains {}.", why.join(", ")))
-                            .color(theme::tokens::TEXT_2),
+                            .color(theme::tokens::TEXT_2()),
                     );
                     ui.add_space(8.0);
                     egui::Frame::new()
-                        .fill(theme::tokens::BG_MAIN)
+                        .fill(theme::tokens::BG_MAIN())
                         .corner_radius(egui::CornerRadius::same(8))
                         .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
@@ -3885,13 +3907,13 @@ impl App {
                                     egui::vec2(16.0, 16.0),
                                     egui::Sense::hover(),
                                 );
-                                kit::paint_icon(ui, r, Icon::Refresh, theme::tokens::TEXT_2);
+                                kit::paint_icon(ui, r, Icon::Refresh, theme::tokens::TEXT_2());
                                 ui.label(
                                     RichText::new(format!(
                                         "Restore {n} session{} from last time?",
                                         if n == 1 { "" } else { "s" }
                                     ))
-                                    .color(theme::tokens::TEXT),
+                                    .color(theme::tokens::TEXT()),
                                 );
                                 ui.add_space(8.0);
                                 if ui.button("Dismiss").clicked() {
@@ -3925,7 +3947,7 @@ impl App {
                             .corner_radius(egui::CornerRadius::same(18))
                             .inner_margin(egui::Margin::symmetric(16, 9))
                             .show(ui, |ui| {
-                                ui.label(RichText::new(msg.as_str()).color(theme::tokens::TEXT));
+                                ui.label(RichText::new(msg.as_str()).color(theme::tokens::TEXT()));
                             });
                     });
                 ctx.request_repaint_after(Duration::from_secs(1));
@@ -3959,12 +3981,16 @@ impl App {
             self.option_as_meta,
             self.high_contrast,
             (self.ai_commands, self.ai_output, self.ai_model.clone()),
-            (self.terminal_font.clone(), self.ligatures),
+            (
+                self.terminal_font.clone(),
+                self.ligatures,
+                self.theme_name.clone(),
+            ),
         );
         let modal = egui::Modal::new(egui::Id::new("settings"))
             .frame(
                 kit::floating_frame()
-                    .fill(t::BG_MAIN)
+                    .fill(t::BG_MAIN())
                     .inner_margin(egui::Margin::ZERO),
             )
             .show(ctx, |ui| {
@@ -3982,16 +4008,24 @@ impl App {
                         ne: 0,
                         se: 0,
                     },
-                    t::BG_SIDEBAR,
+                    t::BG_SIDEBAR(),
                 );
-                ui.painter()
-                    .vline(nav.max.x, nav.y_range(), egui::Stroke::new(1.0, t::BORDER));
+                ui.painter().vline(
+                    nav.max.x,
+                    nav.y_range(),
+                    egui::Stroke::new(1.0, t::BORDER()),
+                );
                 let mut nui = ui.new_child(
                     egui::UiBuilder::new().max_rect(nav.shrink2(egui::vec2(10.0, 16.0))),
                 );
                 nui.horizontal(|ui| {
                     ui.add_space(8.0);
-                    ui.label(RichText::new("Settings").size(15.0).strong().color(t::TEXT));
+                    ui.label(
+                        RichText::new("Settings")
+                            .size(15.0)
+                            .strong()
+                            .color(t::TEXT()),
+                    );
                 });
                 nui.add_space(12.0);
                 nui.spacing_mut().item_spacing.y = 2.0;
@@ -4006,7 +4040,7 @@ impl App {
                         ui.label(
                             RichText::new(format!("Promptly {}", current_version()))
                                 .size(11.5)
-                                .color(t::TEXT_3),
+                                .color(t::TEXT_3()),
                         );
                     });
                 });
@@ -4021,7 +4055,7 @@ impl App {
                         RichText::new(SECTIONS[tab].1)
                             .size(19.0)
                             .strong()
-                            .color(t::TEXT),
+                            .color(t::TEXT()),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if kit::icon_button(ui, Icon::Close, "Close (Esc)", false).clicked() {
@@ -4050,7 +4084,11 @@ impl App {
                 self.option_as_meta,
                 self.high_contrast,
                 (self.ai_commands, self.ai_output, self.ai_model.clone()),
-                (self.terminal_font.clone(), self.ligatures),
+                (
+                    self.terminal_font.clone(),
+                    self.ligatures,
+                    self.theme_name.clone(),
+                ),
             )
         {
             self.save_prefs();
@@ -4071,7 +4109,7 @@ impl App {
             for (i, a) in accounts.iter().enumerate() {
                 kit::setting_row(ui, i == 0, &a.label(), &a.detail(), |ui| {
                     if a.id == active {
-                        kit::pill(ui, "In use", t::ACCENT_HOVER);
+                        kit::pill(ui, "In use", t::ACCENT_HOVER());
                     } else if kit::secondary_button(ui, None, "Use").clicked() {
                         use_id = Some(a.id.clone());
                     }
@@ -4123,7 +4161,7 @@ impl App {
                 "Each account is a Claude Code folder with its own sign-in, settings, skills and history. New sessions use the account in use; running sessions keep theirs.",
             )
             .size(11.5)
-            .color(t::TEXT_3),
+            .color(t::TEXT_3()),
         );
         if !renames.is_empty() {
             let mut c = self.core.lock();
@@ -4142,8 +4180,8 @@ impl App {
             0 => {
                 if self.hooks_locked {
                     egui::Frame::new()
-                        .fill(theme::AMBER.gamma_multiply(0.10))
-                        .stroke(egui::Stroke::new(1.0, theme::AMBER.gamma_multiply(0.35)))
+                        .fill(theme::AMBER().gamma_multiply(0.10))
+                        .stroke(egui::Stroke::new(1.0, theme::AMBER().gamma_multiply(0.35)))
                         .corner_radius(egui::CornerRadius::same(10))
                         .inner_margin(egui::Margin::symmetric(14, 10))
                         .show(ui, |ui| {
@@ -4151,7 +4189,7 @@ impl App {
                             ui.label(
                                 RichText::new("Hooks are locked down by organization-managed settings. Promptly reads transcripts instead.")
                                     .size(12.5)
-                                    .color(theme::AMBER),
+                                    .color(theme::AMBER()),
                             );
                         });
                     ui.add_space(14.0);
@@ -4258,7 +4296,10 @@ impl App {
                             .show(ui, |ui| {
                                 ui.add_space(4.0);
                                 ui.label(
-                                    RichText::new(json).monospace().size(11.5).color(t::TEXT_2),
+                                    RichText::new(json)
+                                        .monospace()
+                                        .size(11.5)
+                                        .color(t::TEXT_2()),
                                 );
                                 ui.add_space(10.0);
                             });
@@ -4268,6 +4309,35 @@ impl App {
             }
             1 => self.accounts_section(ui, actions),
             2 => {
+                // Theme cards, three per row.
+                let mut picked = None;
+                kit::settings_group(ui, Some("Theme"), |ui| {
+                    ui.add_space(12.0);
+                    let themes = theme::all();
+                    let cols = 3;
+                    let gap = 10.0;
+                    let w =
+                        ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+                    for row in themes.chunks(cols) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            for p in row {
+                                if theme_card(ui, p, w, p.name == self.theme_name).clicked() {
+                                    picked = Some(p.name.to_string());
+                                }
+                            }
+                        });
+                        ui.add_space(gap);
+                    }
+                    ui.add_space(2.0);
+                });
+                if let Some(name) = picked
+                    && name != self.theme_name
+                {
+                    theme::set(&name);
+                    self.theme_name = name;
+                    theme::apply_chrome(ui.ctx(), self.high_contrast);
+                }
                 // Installed monospace fonts, scanned once in the background.
                 if self.mono_families.lock().is_none() {
                     *self.mono_families.lock() = Some(vec![]);
@@ -4318,7 +4388,7 @@ impl App {
                                             ui.label(
                                                 RichText::new("Looking for installed fonts…")
                                                     .size(12.0)
-                                                    .color(theme::tokens::TEXT_3),
+                                                    .color(theme::tokens::TEXT_3()),
                                             );
                                         }
                                         for f in &families {
@@ -4344,7 +4414,7 @@ impl App {
                     // Preview in the terminal font itself.
                     ui.add_space(10.0);
                     egui::Frame::new()
-                        .fill(theme::c32(theme::BG))
+                        .fill(theme::c32(theme::BG()))
                         .corner_radius(egui::CornerRadius::same(8))
                         .inner_margin(egui::Margin::symmetric(12, 10))
                         .show(ui, |ui| {
@@ -4354,7 +4424,7 @@ impl App {
                                 ui.label(
                                     RichText::new(sample)
                                         .font(FontId::monospace(13.0))
-                                        .color(theme::tokens::TEXT_1),
+                                        .color(theme::tokens::TEXT_1()),
                                 );
                             } else {
                                 // One glyph at a time, as the terminal draws it.
@@ -4365,7 +4435,7 @@ impl App {
                                             ui.label(
                                                 RichText::new(ch.to_string())
                                                     .font(FontId::monospace(13.0))
-                                                    .color(theme::tokens::TEXT_1),
+                                                    .color(theme::tokens::TEXT_1()),
                                             );
                                         }
                                     });
@@ -4517,7 +4587,7 @@ impl App {
                     });
                     if let Some(e) = &self.cfg_error {
                         ui.add_space(6.0);
-                        ui.label(RichText::new(e).size(12.0).color(theme::RED));
+                        ui.label(RichText::new(e).size(12.0).color(theme::RED()));
                         ui.add_space(8.0);
                     }
                 });
@@ -4624,7 +4694,7 @@ impl App {
                             let content = &v["message"]["content"];
                             if let Some(t) = promptly_core::transcript::message_text(content) {
                                 let col = if ty == "user" {
-                                    theme::BLUE
+                                    theme::BLUE()
                                 } else {
                                     Color32::from_gray(0xd0)
                                 };
@@ -4644,7 +4714,7 @@ impl App {
                                         RichText::new(format!("⏺ {name}"))
                                             .small()
                                             .monospace()
-                                            .color(theme::MUTED),
+                                            .color(theme::MUTED()),
                                     );
                                 }
                             }
@@ -4759,8 +4829,8 @@ impl eframe::App for App {
                     ui.painter().rect(
                         r,
                         egui::CornerRadius::same(16),
-                        theme::tokens::BG_ELEVATED,
-                        egui::Stroke::new(2.0, theme::tokens::ACCENT_HOVER),
+                        theme::tokens::BG_ELEVATED(),
+                        egui::Stroke::new(2.0, theme::tokens::ACCENT_HOVER()),
                         egui::StrokeKind::Inside,
                     );
                     ui.painter().text(
@@ -4768,14 +4838,14 @@ impl eframe::App for App {
                         egui::Align2::CENTER_CENTER,
                         "Drop to attach",
                         egui::FontId::proportional(20.0),
-                        theme::tokens::TEXT,
+                        theme::tokens::TEXT(),
                     );
                     ui.painter().text(
                         r.center() + egui::vec2(0.0, 18.0),
                         egui::Align2::CENTER_CENTER,
                         "Screenshots, PDFs, videos or any file",
                         egui::FontId::proportional(13.0),
-                        theme::tokens::TEXT_2,
+                        theme::tokens::TEXT_2(),
                     );
                 });
         }
@@ -4790,11 +4860,11 @@ impl eframe::App for App {
             .resizable(false)
             .exact_size(26.0)
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(t::BG_SIDEBAR))
+            .frame(egui::Frame::new().fill(t::BG_SIDEBAR()))
             .show(ui, |ui| {
                 let r = ui.max_rect();
                 ui.painter()
-                    .hline(r.x_range(), r.min.y, egui::Stroke::new(1.0, t::BORDER));
+                    .hline(r.x_range(), r.min.y, egui::Stroke::new(1.0, t::BORDER()));
                 self.status_bar(ui);
             });
 
@@ -4804,7 +4874,7 @@ impl eframe::App for App {
             .size_range(210.0..=380.0)
             .frame(
                 egui::Frame::new()
-                    .fill(t::BG_SIDEBAR)
+                    .fill(t::BG_SIDEBAR())
                     .inner_margin(egui::Margin {
                         left: 10,
                         right: 10,
@@ -4824,7 +4894,7 @@ impl eframe::App for App {
                 .resizable(true)
                 .default_size(380.0)
                 .size_range(280.0..=720.0)
-                .frame(egui::Frame::new().fill(t::BG_SIDEBAR))
+                .frame(egui::Frame::new().fill(t::BG_SIDEBAR()))
                 .show(ui, |ui| self.thinking_ui(ui));
         }
 
@@ -4833,7 +4903,7 @@ impl eframe::App for App {
                 .resizable(true)
                 .default_size(720.0)
                 .size_range(360.0..=1600.0)
-                .frame(egui::Frame::new().fill(t::BG_SIDEBAR))
+                .frame(egui::Frame::new().fill(t::BG_SIDEBAR()))
                 .show(ui, |ui| self.review_ui(ui, &ctx, false));
         }
 
@@ -4848,7 +4918,7 @@ impl eframe::App for App {
                 .show_separator_line(false)
                 .frame(
                     egui::Frame::new()
-                        .fill(t::BG_MAIN)
+                        .fill(t::BG_MAIN())
                         .inner_margin(egui::Margin {
                             left: 12,
                             right: 12,
@@ -4937,13 +5007,14 @@ impl eframe::App for App {
         }
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            ui.painter().rect_filled(ui.max_rect(), 0.0, t::BG_MAIN);
+            ui.painter().rect_filled(ui.max_rect(), 0.0, t::BG_MAIN());
             if self.usage_mode {
                 self.usage_view(ui);
             } else if self.grid_mode {
                 self.grid(ui);
             } else if self.review_open && self.review_full {
-                ui.painter().rect_filled(ui.max_rect(), 0.0, t::BG_SIDEBAR);
+                ui.painter()
+                    .rect_filled(ui.max_rect(), 0.0, t::BG_SIDEBAR());
                 self.review_ui(ui, &ctx, true);
             } else {
                 self.panes_area(ui, overlay_open);
@@ -5151,6 +5222,47 @@ impl App {
             .map(|m| (m.account.clone(), m.status.cost_usd, m.status.model.clone()))
     }
 
+    /// Start a plain shell in `cwd` (tests).
+    pub fn demo_shell(&mut self, cwd: &str) -> Option<PaneId> {
+        self.spawn(NewSession {
+            cwd: Some(cwd.into()),
+            ..Default::default()
+        })
+    }
+
+    /// Open the review pane full-width on a scope (tests).
+    pub fn demo_review(&mut self, scope: promptly_core::git::DiffScope, commit: Option<String>) {
+        self.review_open = true;
+        self.review_full = true;
+        self.settings_open = false;
+        self.review.scope = scope;
+        self.review.commit = commit;
+    }
+
+    pub fn demo_review_shown(&self) -> Option<promptly_core::git::ReviewDiff> {
+        self.review.shown().cloned()
+    }
+
+    /// Switch theme like the Settings picker does (tests).
+    pub fn demo_theme(&mut self, name: &str) {
+        theme::set(name);
+        self.theme_name = name.to_string();
+        theme::apply_chrome(&self.ctx, false);
+    }
+
+    pub fn demo_settings_tab(&mut self, tab: usize) {
+        self.settings_open = true;
+        self.review_open = false;
+        self.ctx
+            .data_mut(|d| d.insert_temp(egui::Id::new("settings-tab"), tab));
+    }
+
+    pub fn demo_close_overlays(&mut self) {
+        self.settings_open = false;
+        self.review_open = false;
+        self.review_full = false;
+    }
+
     /// Claude is working on a turn.
     pub fn demo_working(&self, id: PaneId) -> bool {
         self.core
@@ -5349,6 +5461,7 @@ struct Prefs {
     ai_model: String,
     terminal_font: String,
     ligatures: bool,
+    theme: String,
 }
 
 impl Default for Prefs {
@@ -5365,6 +5478,7 @@ impl Default for Prefs {
             ai_model: "sonnet".into(),
             terminal_font: crate::fonts::BUILTIN.into(),
             ligatures: true,
+            theme: theme::DEFAULT.into(),
         }
     }
 }
@@ -5417,6 +5531,96 @@ pub fn login_shell_exec(shell: &str, bin: String, args: Vec<String>) -> Vec<Stri
     }
 }
 
+/// A theme preview: its window chrome, accent and terminal colors.
+fn theme_card(ui: &mut egui::Ui, p: &theme::Palette, w: f32, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 92.0), egui::Sense::click());
+    let h = kit::hover_t(ui, &resp);
+    let painter = ui.painter_at(rect);
+    let r = egui::CornerRadius::same(9);
+    painter.rect_filled(rect, r, p.bg_main);
+    // Sidebar strip with two "rows", one active.
+    let side = egui::Rect::from_min_size(rect.min, egui::vec2(w * 0.28, 66.0));
+    painter.rect_filled(
+        side,
+        egui::CornerRadius {
+            nw: 9,
+            ..Default::default()
+        },
+        p.bg_sidebar,
+    );
+    for (i, c) in [p.active, p.hover].into_iter().enumerate() {
+        painter.rect_filled(
+            egui::Rect::from_min_size(
+                side.min + egui::vec2(6.0, 10.0 + i as f32 * 14.0),
+                egui::vec2(side.width() - 12.0, 9.0),
+            ),
+            3.0,
+            c,
+        );
+    }
+    // "Code" lines in terminal colors, and an accent button.
+    let x0 = side.max.x + 10.0;
+    let lines = [(p.ansi[4], 0.55), (p.ansi[2], 0.4), (p.ansi[5], 0.65)];
+    for (i, (c, frac)) in lines.into_iter().enumerate() {
+        painter.rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(x0, rect.min.y + 12.0 + i as f32 * 12.0),
+                egui::vec2((rect.max.x - x0 - 10.0) * frac, 5.0),
+            ),
+            2.5,
+            theme::c32(c),
+        );
+    }
+    painter.rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(rect.max.x - 34.0, rect.min.y + 48.0),
+            egui::vec2(24.0, 10.0),
+        ),
+        3.0,
+        p.accent,
+    );
+    // Name bar.
+    let bar = egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - 26.0), rect.max);
+    painter.rect_filled(
+        bar,
+        egui::CornerRadius {
+            sw: 9,
+            se: 9,
+            ..Default::default()
+        },
+        p.bg_elevated,
+    );
+    painter.text(
+        bar.left_center() + egui::vec2(10.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        p.name,
+        FontId::proportional(12.0),
+        p.text,
+    );
+    if selected {
+        kit::paint_icon(
+            ui,
+            egui::Rect::from_center_size(
+                bar.right_center() - egui::vec2(14.0, 0.0),
+                egui::vec2(12.0, 12.0),
+            ),
+            Icon::Check,
+            p.accent,
+        );
+    }
+    let stroke = if selected {
+        egui::Stroke::new(2.0, theme::tokens::ACCENT())
+    } else {
+        egui::Stroke::new(
+            1.0,
+            kit::mix(theme::tokens::BORDER(), theme::tokens::TEXT_3(), h),
+        )
+    };
+    painter.rect_stroke(rect, r, stroke, egui::StrokeKind::Inside);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(p.name)
+}
+
 /// Settings-row control: a switch bound to `on`; yields whether it changed.
 fn switch(on: &mut bool) -> impl FnOnce(&mut egui::Ui) -> bool + '_ {
     move |ui| kit::toggle_switch(ui, on).changed()
@@ -5457,12 +5661,16 @@ fn callout(ui: &mut egui::Ui, color: Color32, body: impl FnOnce(&mut egui::Ui)) 
 fn search_field(ui: &mut egui::Ui, text: &mut String, hint: &str) -> egui::Response {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
-        kit::paint_icon(ui, r, Icon::Search, theme::tokens::TEXT_3);
+        kit::paint_icon(ui, r, Icon::Search, theme::tokens::TEXT_3());
         let resp = ui.add(
             egui::TextEdit::singleline(text)
                 .frame(egui::Frame::NONE)
                 .font(egui::FontId::proportional(16.0))
-                .hint_text(RichText::new(hint).size(16.0).color(theme::tokens::TEXT_3))
+                .hint_text(
+                    RichText::new(hint)
+                        .size(16.0)
+                        .color(theme::tokens::TEXT_3()),
+                )
                 .desired_width(f32::INFINITY),
         );
         resp.request_focus();
@@ -5487,20 +5695,20 @@ fn list_item(
         ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::click());
     if resp.hovered() && !selected {
         ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(7), t::HOVER);
+            .rect_filled(rect, egui::CornerRadius::same(7), t::HOVER());
     }
     if selected {
         ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(7), t::ACTIVE);
+            .rect_filled(rect, egui::CornerRadius::same(7), t::ACTIVE());
         ui.painter().rect_filled(
             egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 8.0), egui::vec2(3.0, h - 16.0)),
             egui::CornerRadius::same(2),
-            t::ACCENT_HOVER,
+            t::ACCENT_HOVER(),
         );
         resp.scroll_to_me(None);
     }
     let max_w = rect.width() - 24.0 - if shortcut.is_some() { 90.0 } else { 0.0 };
-    let col = if selected { t::TEXT } else { t::TEXT_1 };
+    let col = if selected { t::TEXT() } else { t::TEXT_1() };
     let g = kit::elide(ui, title, egui::FontId::proportional(13.5), col, max_w);
     let ty = if subtitle.is_some() {
         rect.min.y + 7.0
@@ -5510,11 +5718,17 @@ fn list_item(
     ui.painter()
         .galley(egui::pos2(rect.min.x + 12.0, ty), g, col);
     if let Some(sub) = subtitle {
-        let g = kit::elide(ui, sub, egui::FontId::proportional(11.5), t::TEXT_3, max_w);
+        let g = kit::elide(
+            ui,
+            sub,
+            egui::FontId::proportional(11.5),
+            t::TEXT_3(),
+            max_w,
+        );
         ui.painter().galley(
             egui::pos2(rect.min.x + 12.0, rect.min.y + 26.0),
             g,
-            t::TEXT_3,
+            t::TEXT_3(),
         );
     }
     if let Some(sc) = shortcut {
@@ -5523,7 +5737,7 @@ fn list_item(
             egui::Align2::RIGHT_CENTER,
             sc,
             egui::FontId::proportional(12.0),
-            t::TEXT_3,
+            t::TEXT_3(),
         );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -5537,7 +5751,7 @@ fn footer_hints(ui: &mut egui::Ui, hints: &[(&str, &str)]) {
             ui.label(
                 RichText::new(*label)
                     .size(11.5)
-                    .color(theme::tokens::TEXT_3),
+                    .color(theme::tokens::TEXT_3()),
             );
             ui.add_space(8.0);
         }

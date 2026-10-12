@@ -39,7 +39,9 @@ const TREE_W: f32 = 240.0;
 #[derive(Default)]
 pub struct ReviewState {
     pub dir: Option<PathBuf>,
-    loaded: Option<(u64, DiffScope)>,
+    loaded: Option<(u64, DiffScope, Option<String>)>,
+    /// Commits scope: the commit shown (None = newest).
+    pub commit: Option<String>,
     loaded_at: Option<Instant>,
     result: DiffSlot,
     loading: bool,
@@ -110,6 +112,7 @@ impl ReviewState {
             self.collapsed.clear();
             self.selected = None;
             self.loaded = None;
+            self.commit = None;
             // Outside a repository only the session's own edits can be shown.
             self.is_repo = git::repo_root(dir).is_some();
             if !self.is_repo {
@@ -119,8 +122,9 @@ impl ReviewState {
             }
         }
         let stale = self.loaded_at.is_none_or(|t| t.elapsed() > AUTO_REFRESH);
-        if (self.loaded != Some((seq, self.scope)) || stale) && !self.loading {
-            self.loaded = Some((seq, self.scope));
+        let key = (seq, self.scope, self.commit.clone());
+        if (self.loaded.as_ref() != Some(&key) || stale) && !self.loading {
+            self.loaded = Some(key);
             self.reload(ctx);
         }
         if let Some(r) = self.result.lock().take() {
@@ -131,6 +135,14 @@ impl ReviewState {
                     // Keep "viewed" only for files still in the diff.
                     let paths: HashSet<_> = d.files.iter().map(|f| f.path.clone()).collect();
                     self.viewed.retain(|p| paths.contains(p));
+                    // The newest commit was picked for us: remember it, so the
+                    // next sync doesn't reload the same thing.
+                    if d.scope == DiffScope::Commits && self.commit.is_none() {
+                        self.commit = d.commit.as_ref().map(|c| c.sha.clone());
+                        if let Some(l) = self.loaded.as_mut() {
+                            l.2 = self.commit.clone();
+                        }
+                    }
                     self.diff = Some(d);
                     self.error = None;
                 }
@@ -150,15 +162,22 @@ impl ReviewState {
         let ctx = ctx.clone();
         let scope = self.scope;
         let baselines = self.baselines.clone();
+        let want = self.commit.clone();
         std::thread::spawn(move || {
-            let r = if scope == DiffScope::Session {
-                promptly_core::session_changes::diff(&dir, &baselines)
-            } else {
-                git::review_diff(&dir, scope)
+            let r = match scope {
+                DiffScope::Session => promptly_core::session_changes::diff(&dir, &baselines),
+                DiffScope::Commits => commits_diff(&dir, want.as_deref()),
+                _ => git::review_diff(&dir, scope),
             };
             *slot.lock() = Some(r);
             ctx.request_repaint();
         });
+    }
+
+    /// The diff on screen (tests).
+    #[cfg(test)]
+    pub fn shown(&self) -> Option<&ReviewDiff> {
+        self.diff.as_ref()
     }
 
     fn is_folded(&self, f: &FileDiff) -> bool {
@@ -209,14 +228,14 @@ impl ReviewState {
         let (hrect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
         ui.painter().line_segment(
             [hrect.left_bottom(), hrect.right_bottom()],
-            Stroke::new(1.0, t::BORDER),
+            Stroke::new(1.0, t::BORDER()),
         );
         let mut h = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(hrect.shrink2(vec2(12.0, 0.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        h.label(RichText::new("Changes").size(14.0).color(t::TEXT));
+        h.label(RichText::new("Changes").size(14.0).color(t::TEXT()));
         let mut scope = self.scope;
         if self.is_repo {
             seg(
@@ -226,6 +245,7 @@ impl ReviewState {
                 &[
                     (DiffScope::Branch, "Branch"),
                     (DiffScope::Uncommitted, "Uncommitted"),
+                    (DiffScope::Commits, "Commits"),
                     (DiffScope::Session, "This session"),
                 ],
             );
@@ -308,19 +328,25 @@ impl ReviewState {
                 ui.label(
                     RichText::new(format!("{n} file{} changed", if n == 1 { "" } else { "s" }))
                         .size(13.0)
-                        .color(t::TEXT),
+                        .color(t::TEXT()),
                 );
                 ui.label(
                     RichText::new(format!("+{add}"))
                         .size(13.0)
-                        .color(theme::GREEN),
+                        .color(theme::GREEN()),
                 );
                 ui.label(
                     RichText::new(format!("−{rem}"))
                         .size(13.0)
-                        .color(theme::RED),
+                        .color(theme::RED()),
                 );
                 let ctx_line = match (&d.base, d.scope) {
+                    (_, DiffScope::Commits) => match &d.commit {
+                        Some(c) => {
+                            format!("{} · {} · {}, {}", c.short, c.subject, c.author, c.when)
+                        }
+                        None => String::new(),
+                    },
                     (Some(b), DiffScope::Branch) => format!(
                         "{} vs {b}{}",
                         d.branch.clone().unwrap_or_default(),
@@ -343,7 +369,7 @@ impl ReviewState {
                     ),
                     _ => "Uncommitted changes".to_string(),
                 };
-                ui.label(RichText::new(ctx_line).size(12.0).color(t::TEXT_3));
+                ui.label(RichText::new(ctx_line).size(12.0).color(t::TEXT_3()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
                     if n > 0 {
@@ -352,16 +378,16 @@ impl ReviewState {
                             ui,
                             frac,
                             if viewed_n == n {
-                                theme::GREEN
+                                theme::GREEN()
                             } else {
-                                t::TEXT_2
+                                t::TEXT_2()
                             },
                             60.0,
                         );
                         ui.label(
                             RichText::new(format!("{viewed_n} / {n} viewed"))
                                 .size(12.0)
-                                .color(t::TEXT_2),
+                                .color(t::TEXT_2()),
                         );
                     }
                 });
@@ -372,11 +398,15 @@ impl ReviewState {
                 summary.response.rect.left_bottom(),
                 summary.response.rect.right_bottom(),
             ],
-            Stroke::new(1.0, t::BORDER),
+            Stroke::new(1.0, t::BORDER()),
         );
 
-        if d.files.is_empty() {
+        if d.files.is_empty() && (d.scope != DiffScope::Commits || d.commits.is_empty()) {
             let (title, body) = match d.scope {
+                DiffScope::Commits => (
+                    "No commits",
+                    "This branch has no commits of its own yet. Commits appear here as they are made.",
+                ),
                 DiffScope::Session => (
                     "No edits yet",
                     "Files Claude edits in this session appear here as it works, in any folder. Changes made by shell commands show under Uncommitted in a git repository.",
@@ -410,14 +440,18 @@ impl ReviewState {
         if let Some(tr) = tree_rect {
             ui.painter().line_segment(
                 [tr.right_top(), tr.right_bottom()],
-                Stroke::new(1.0, t::BORDER),
+                Stroke::new(1.0, t::BORDER()),
             );
             let mut tu = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(tr.shrink2(vec2(8.0, 8.0)))
                     .id_salt("review-tree"),
             );
-            self.tree(&mut tu, &d, &mut action);
+            if d.scope == DiffScope::Commits {
+                self.commit_list(&mut tu, &d);
+            } else {
+                self.tree(&mut tu, &d, &mut action);
+            }
         }
         let mut du = ui.new_child(
             egui::UiBuilder::new()
@@ -425,11 +459,124 @@ impl ReviewState {
                 .id_salt("review-diff"),
         );
         if !show_tree {
-            self.file_jump(&mut du, &d);
+            if d.scope == DiffScope::Commits {
+                self.commit_jump(&mut du, &d);
+            } else {
+                self.file_jump(&mut du, &d);
+            }
         }
         self.diff_column(&mut du, &d, &mut action);
         ui.advance_cursor_after_rect(body);
         action
+    }
+
+    // ---------------------------------------------------------------- commits
+
+    fn pick_commit(&mut self, sha: &str) {
+        if self.commit.as_deref() == Some(sha) {
+            return;
+        }
+        self.commit = Some(sha.to_string());
+        self.viewed.clear();
+        self.collapsed.clear();
+        self.selected = None;
+        self.scroll_to = Some(0);
+    }
+
+    /// The branch's commits, newest first; the shown one is highlighted.
+    fn commit_list(&mut self, ui: &mut egui::Ui, d: &ReviewDiff) {
+        let shown = d.commit.as_ref().map(|c| c.sha.clone());
+        let mut pick = None;
+        ui.label(
+            RichText::new(match &d.base {
+                Some(b) => format!("{} commits since {b}", d.commits.len()),
+                None => format!("Last {} commits", d.commits.len()),
+            })
+            .size(11.0)
+            .color(t::TEXT_3()),
+        );
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .id_salt("commit-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for c in &d.commits {
+                    let on = shown.as_deref() == Some(c.sha.as_str());
+                    let (r, resp) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+                    let h = kit::hover_t(ui, &resp);
+                    let bg = if on {
+                        t::ACTIVE()
+                    } else {
+                        kit::mix(Color32::TRANSPARENT, t::HOVER(), h)
+                    };
+                    ui.painter().rect_filled(r, CornerRadius::same(6), bg);
+                    let w = r.width() - 16.0;
+                    let g = kit::elide(ui, &c.subject, FontId::proportional(12.5), t::TEXT(), w);
+                    ui.painter()
+                        .galley(pos2(r.min.x + 8.0, r.min.y + 6.0), g, t::TEXT());
+                    ui.painter().text(
+                        pos2(r.min.x + 8.0, r.min.y + 33.0),
+                        egui::Align2::LEFT_CENTER,
+                        &c.short,
+                        FontId::monospace(11.0),
+                        t::TEXT_2(),
+                    );
+                    let meta = kit::elide(
+                        ui,
+                        &format!("{} · {}", c.author, c.when),
+                        FontId::proportional(11.0),
+                        t::TEXT_3(),
+                        w - 120.0,
+                    );
+                    ui.painter()
+                        .galley(pos2(r.min.x + 66.0, r.min.y + 26.0), meta, t::TEXT_3());
+                    diff_stat(ui, pos2(r.max.x - 8.0, r.min.y + 33.0), c.added, c.removed);
+                    if resp
+                        .on_hover_text(format!("{}\n{} · {}", c.subject, c.short, c.when))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        pick = Some(c.sha.clone());
+                    }
+                }
+            });
+        if let Some(sha) = pick {
+            self.pick_commit(&sha);
+        }
+    }
+
+    /// Narrow layout: a commit picker instead of the list.
+    fn commit_jump(&mut self, ui: &mut egui::Ui, d: &ReviewDiff) {
+        let mut pick = None;
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            let label = d
+                .commit
+                .as_ref()
+                .map(|c| format!("{}  {}", c.short, c.subject))
+                .unwrap_or_else(|| "Pick a commit…".into());
+            egui::ComboBox::from_id_salt("commit-jump")
+                .selected_text(label)
+                .width(ui.available_width() - 20.0)
+                .show_ui(ui, |ui| {
+                    for c in &d.commits {
+                        let on = d.commit.as_ref().is_some_and(|x| x.sha == c.sha);
+                        if ui
+                            .selectable_label(on, format!("{}  {}", c.short, c.subject))
+                            .clicked()
+                        {
+                            pick = Some(c.sha.clone());
+                        }
+                    }
+                });
+        });
+        ui.add_space(4.0);
+        if let Some(sha) = pick {
+            self.pick_commit(&sha);
+        }
     }
 
     // ---------------------------------------------------------------- tree
@@ -461,19 +608,19 @@ impl ReviewState {
                                     vec2(12.0, 12.0),
                                 ),
                                 kit::Icon::ChevronDown,
-                                t::TEXT_3,
+                                t::TEXT_3(),
                             );
                             let g = kit::elide(
                                 ui,
                                 dir.trim_end_matches('/'),
                                 FontId::proportional(11.5),
-                                t::TEXT_2,
+                                t::TEXT_2(),
                                 r.width() - 26.0,
                             );
                             ui.painter().galley(
                                 pos2(r.min.x + 20.0, r.center().y + 2.0 - g.size().y / 2.0),
                                 g,
-                                t::TEXT_2,
+                                t::TEXT_2(),
                             );
                         }
                         last_dir = Some(dir.clone());
@@ -484,9 +631,9 @@ impl ReviewState {
                     let selected = self.selected == Some(fi);
                     let h = kit::hover_t(ui, &resp);
                     let bg = if selected {
-                        t::ACTIVE
+                        t::ACTIVE()
                     } else {
-                        kit::mix(Color32::TRANSPARENT, t::HOVER, h)
+                        kit::mix(Color32::TRANSPARENT, t::HOVER(), h)
                     };
                     ui.painter().rect_filled(r, CornerRadius::same(6), bg);
                     let viewed = self.viewed.contains(&f.path);
@@ -500,11 +647,11 @@ impl ReviewState {
                         col,
                     );
                     let name_col = if viewed {
-                        t::TEXT_3
+                        t::TEXT_3()
                     } else if selected {
-                        t::TEXT
+                        t::TEXT()
                     } else {
-                        t::TEXT_1
+                        t::TEXT_1()
                     };
                     let g = kit::elide(
                         ui,
@@ -526,7 +673,7 @@ impl ReviewState {
                                 vec2(13.0, 13.0),
                             ),
                             kit::Icon::Check,
-                            t::TEXT_3,
+                            t::TEXT_3(),
                         );
                     } else {
                         diff_stat(ui, pos2(r.max.x - 6.0, r.center().y), f.added, f.removed);
@@ -716,7 +863,7 @@ impl ReviewState {
                         sw: 8,
                         se: 8,
                     },
-                    t::BG_MAIN,
+                    t::BG_MAIN(),
                 );
                 let (text, link) = if f.binary {
                     ("Binary file not shown.".to_string(), None)
@@ -740,7 +887,7 @@ impl ReviewState {
                     egui::Align2::LEFT_CENTER,
                     &text,
                     FontId::proportional(12.5),
-                    t::TEXT_2,
+                    t::TEXT_2(),
                 );
                 if let Some(l) = link {
                     let lr = Rect::from_min_size(
@@ -753,7 +900,7 @@ impl ReviewState {
                         egui::Align2::LEFT_CENTER,
                         l,
                         FontId::proportional(12.5),
-                        theme::BLUE,
+                        theme::BLUE(),
                     );
                     if resp
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -798,7 +945,7 @@ impl ReviewState {
                 paint_line(ui, rr, right, r.is_some(), false, false);
                 ui.painter().line_segment(
                     [rr.left_top(), rr.left_bottom()],
-                    Stroke::new(1.0, t::BORDER),
+                    Stroke::new(1.0, t::BORDER()),
                 );
                 None
             }
@@ -808,21 +955,21 @@ impl ReviewState {
                 ui.painter().rect(
                     r,
                     CornerRadius::same(8),
-                    t::BG_ELEVATED,
-                    Stroke::new(1.0, t::ACCENT.gamma_multiply(0.6)),
+                    t::BG_ELEVATED(),
+                    Stroke::new(1.0, t::ACCENT().gamma_multiply(0.6)),
                     egui::StrokeKind::Inside,
                 );
                 let g = kit::elide(
                     ui,
                     &c.text,
                     FontId::proportional(12.5),
-                    t::TEXT,
+                    t::TEXT(),
                     r.width() - 90.0,
                 );
                 ui.painter().galley(
                     pos2(r.min.x + 12.0, r.center().y - g.size().y / 2.0),
                     g,
-                    t::TEXT,
+                    t::TEXT(),
                 );
                 let del = Rect::from_min_size(
                     pos2(r.max.x - 64.0, r.min.y + 6.0),
@@ -835,9 +982,9 @@ impl ReviewState {
                     "Delete",
                     FontId::proportional(11.5),
                     if resp.hovered() {
-                        theme::RED
+                        theme::RED()
                     } else {
-                        t::TEXT_3
+                        t::TEXT_3()
                     },
                 );
                 if resp
@@ -876,13 +1023,13 @@ impl ReviewState {
         };
         let p = ui.painter();
         if sticky {
-            p.rect_filled(rect.with_max_y(r.max.y), 0.0, t::BG_SIDEBAR);
+            p.rect_filled(rect.with_max_y(r.max.y), 0.0, t::BG_SIDEBAR());
         }
         p.rect(
             r,
             radius,
-            t::BG_ELEVATED,
-            Stroke::new(1.0, t::BORDER),
+            t::BG_ELEVATED(),
+            Stroke::new(1.0, t::BORDER()),
             egui::StrokeKind::Inside,
         );
         let id = ui.id().with(("hdr", fi, sticky));
@@ -901,7 +1048,7 @@ impl ReviewState {
             } else {
                 kit::Icon::ChevronDown
             },
-            t::TEXT_2,
+            t::TEXT_2(),
         );
         let (letter, col) = status_style(f.status);
         let badge = Rect::from_center_size(pos2(r.min.x + 40.0, cy), vec2(18.0, 18.0));
@@ -922,20 +1069,20 @@ impl ReviewState {
             job.append(
                 &format!("{old} → "),
                 0.0,
-                egui::TextFormat::simple(FontId::monospace(12.0), t::TEXT_3),
+                egui::TextFormat::simple(FontId::monospace(12.0), t::TEXT_3()),
             );
         }
         job.append(
             &dir,
             0.0,
-            egui::TextFormat::simple(FontId::monospace(12.0), t::TEXT_3),
+            egui::TextFormat::simple(FontId::monospace(12.0), t::TEXT_3()),
         );
         job.append(
             &name,
             0.0,
             egui::TextFormat::simple(
                 FontId::monospace(12.0),
-                if viewed { t::TEXT_2 } else { t::TEXT },
+                if viewed { t::TEXT_2() } else { t::TEXT() },
             ),
         );
         job.wrap = egui::text::TextWrapping {
@@ -947,7 +1094,7 @@ impl ReviewState {
         let g = ui.fonts_mut(|fo| fo.layout_job(job));
         let gw = g.size().x;
         ui.painter()
-            .galley(pos2(r.min.x + 58.0, cy - g.size().y / 2.0), g, t::TEXT);
+            .galley(pos2(r.min.x + 58.0, cy - g.size().y / 2.0), g, t::TEXT());
 
         // +N −M and the five-block bar, like GitHub.
         let stat_x = r.min.x + 66.0 + gw;
@@ -959,11 +1106,11 @@ impl ReviewState {
         let red = if f.removed > 0 { (5 - green).max(1) } else { 0 };
         for b in 0..5 {
             let c = if b < green {
-                theme::GREEN.gamma_multiply(0.85)
+                theme::GREEN().gamma_multiply(0.85)
             } else if b < green + red {
-                theme::RED.gamma_multiply(0.85)
+                theme::RED().gamma_multiply(0.85)
             } else {
-                t::BORDER_STRONG
+                t::BORDER_STRONG()
             };
             ui.painter().rect_filled(
                 Rect::from_min_size(pos2(blocks_x + b as f32 * 8.0, cy - 3.5), vec2(7.0, 7.0)),
@@ -985,36 +1132,41 @@ impl ReviewState {
         ui.painter().rect_filled(
             vr,
             CornerRadius::same(6),
-            kit::mix(Color32::TRANSPARENT, t::HOVER, vh),
+            kit::mix(Color32::TRANSPARENT, t::HOVER(), vh),
         );
         let box_r = Rect::from_center_size(pos2(vr.min.x + 15.0, cy), vec2(14.0, 14.0));
         ui.painter().rect(
             box_r,
             CornerRadius::same(4),
             if viewed {
-                t::ACCENT
+                t::ACCENT()
             } else {
                 Color32::TRANSPARENT
             },
             Stroke::new(
                 1.2,
                 if viewed {
-                    t::ACCENT
+                    t::ACCENT()
                 } else {
-                    kit::mix(t::TEXT_3, t::TEXT_2, vh)
+                    kit::mix(t::TEXT_3(), t::TEXT_2(), vh)
                 },
             ),
             egui::StrokeKind::Inside,
         );
         if viewed {
-            kit::paint_icon(ui, box_r.shrink(2.0), kit::Icon::Check, Color32::WHITE);
+            kit::paint_icon(
+                ui,
+                box_r.shrink(2.0),
+                kit::Icon::Check,
+                crate::theme::on_accent(),
+            );
         }
         ui.painter().text(
             pos2(vr.min.x + 29.0, cy),
             egui::Align2::LEFT_CENTER,
             "Viewed",
             FontId::proportional(12.0),
-            if viewed { t::TEXT_1 } else { t::TEXT_2 },
+            if viewed { t::TEXT_1() } else { t::TEXT_2() },
         );
         if vresp
             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1031,13 +1183,13 @@ impl ReviewState {
         ui.painter().rect_filled(
             or,
             CornerRadius::same(6),
-            kit::mix(Color32::TRANSPARENT, t::HOVER, oh),
+            kit::mix(Color32::TRANSPARENT, t::HOVER(), oh),
         );
         kit::paint_icon(
             ui,
             or.shrink2(vec2(7.0, 6.5)),
             kit::Icon::External,
-            kit::mix(t::TEXT_2, t::TEXT, oh),
+            kit::mix(t::TEXT_2(), t::TEXT(), oh),
         );
         let oresp = oresp.on_hover_text("Open in editor");
         if f.status != FileStatus::Deleted
@@ -1062,7 +1214,7 @@ impl ReviewState {
     fn comment_bar(&mut self, ui: &mut egui::Ui, action: &mut Option<ReviewAction>) {
         if !self.comments.is_empty() && self.draft.is_none() {
             egui::Frame::new()
-                .fill(t::ACCENT.gamma_multiply(0.10))
+                .fill(t::ACCENT().gamma_multiply(0.10))
                 .corner_radius(CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .outer_margin(egui::Margin::symmetric(12, 8))
@@ -1074,7 +1226,7 @@ impl ReviewState {
                                 "{n} pending comment{}",
                                 if n == 1 { "" } else { "s" }
                             ))
-                            .color(t::TEXT_1),
+                            .color(t::TEXT_1()),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if kit::primary_button(
@@ -1101,8 +1253,8 @@ impl ReviewState {
         let mut done = None;
         if let Some(dr) = self.draft.as_mut() {
             egui::Frame::new()
-                .fill(t::BG_ELEVATED)
-                .stroke(Stroke::new(1.0, t::BORDER_STRONG))
+                .fill(t::BG_ELEVATED())
+                .stroke(Stroke::new(1.0, t::BORDER_STRONG()))
                 .corner_radius(CornerRadius::same(8))
                 .inner_margin(egui::Margin::same(10))
                 .outer_margin(egui::Margin::symmetric(12, 8))
@@ -1114,13 +1266,13 @@ impl ReviewState {
                             dr.line.map(|l| format!(":{l}")).unwrap_or_default()
                         ))
                         .size(12.0)
-                        .color(t::TEXT_2),
+                        .color(t::TEXT_2()),
                     );
                     ui.label(
                         RichText::new(dr.quote.trim())
                             .monospace()
                             .size(11.5)
-                            .color(t::TEXT_3),
+                            .color(t::TEXT_3()),
                     );
                     let r = ui.add(
                         egui::TextEdit::multiline(&mut dr.text)
@@ -1219,30 +1371,34 @@ fn paint_line(
 ) {
     let p = ui.painter_at(rect);
     let Some(l) = l else {
-        let fill = if present { t::BG_MAIN } else { t::BG_SIDEBAR };
+        let fill = if present {
+            t::BG_MAIN()
+        } else {
+            t::BG_SIDEBAR()
+        };
         p.rect_filled(rect, 0.0, fill);
         return;
     };
     let (bg, fg, sign) = match l.kind {
         LineKind::Added => (
             Color32::from_rgba_unmultiplied(0x3f, 0xb9, 0x50, 16),
-            t::TEXT_1,
+            t::TEXT_1(),
             "+",
         ),
         LineKind::Removed => (
             Color32::from_rgba_unmultiplied(0xe5, 0x53, 0x4b, 16),
-            t::TEXT_1,
+            t::TEXT_1(),
             "−",
         ),
-        LineKind::Hunk => (t::BG_SIDEBAR, t::TEXT_3, ""),
-        LineKind::Meta => (t::BG_MAIN, t::TEXT_3, ""),
-        LineKind::Context => (t::BG_MAIN, t::TEXT_2, " "),
+        LineKind::Hunk => (t::BG_SIDEBAR(), t::TEXT_3(), ""),
+        LineKind::Meta => (t::BG_MAIN(), t::TEXT_3(), ""),
+        LineKind::Context => (t::BG_MAIN(), t::TEXT_2(), " "),
     };
     p.rect_filled(
         rect,
         0.0,
         if hovered && l.kind != LineKind::Hunk {
-            t::HOVER
+            t::HOVER()
         } else {
             bg
         },
@@ -1256,8 +1412,8 @@ fn paint_line(
             Color32::from_black_alpha(28),
         );
         let edge = match l.kind {
-            LineKind::Added => Some(theme::GREEN),
-            LineKind::Removed => Some(theme::RED),
+            LineKind::Added => Some(theme::GREEN()),
+            LineKind::Removed => Some(theme::RED()),
             _ => None,
         };
         if let Some(c) = edge {
@@ -1276,7 +1432,7 @@ fn paint_line(
                 egui::Align2::RIGHT_CENTER,
                 n.to_string(),
                 mono.clone(),
-                t::TEXT_3,
+                t::TEXT_3(),
             );
         }
         if let Some(n) = l.new_no {
@@ -1285,7 +1441,7 @@ fn paint_line(
                 egui::Align2::RIGHT_CENTER,
                 n.to_string(),
                 mono.clone(),
-                t::TEXT_3,
+                t::TEXT_3(),
             );
         }
     }
@@ -1293,13 +1449,13 @@ fn paint_line(
         p.circle_filled(
             pos2(rect.min.x + 6.0, rect.center().y),
             3.0,
-            t::ACCENT_HOVER,
+            t::ACCENT_HOVER(),
         );
     }
     let sign_col = match l.kind {
-        LineKind::Added => theme::GREEN,
-        LineKind::Removed => theme::RED,
-        _ => t::TEXT_3,
+        LineKind::Added => theme::GREEN(),
+        LineKind::Removed => theme::RED(),
+        _ => t::TEXT_3(),
     };
     let text = if l.kind == LineKind::Hunk {
         l.text.clone()
@@ -1335,9 +1491,9 @@ fn diff_stat_width(ui: &egui::Ui, added: u32, removed: u32) -> f32 {
     let (a, r) = diff_stat_text(added, removed);
     let f = FontId::proportional(11.5);
     ui.fonts_mut(|fo| {
-        fo.layout_no_wrap(a, f.clone(), t::TEXT).size().x
+        fo.layout_no_wrap(a, f.clone(), t::TEXT()).size().x
             + 6.0
-            + fo.layout_no_wrap(r, f, t::TEXT).size().x
+            + fo.layout_no_wrap(r, f, t::TEXT()).size().x
     })
 }
 
@@ -1351,9 +1507,9 @@ fn diff_stat(ui: &egui::Ui, right: egui::Pos2, added: u32, removed: u32) {
         r,
         f.clone(),
         if removed == 0 {
-            t::TEXT_3
+            t::TEXT_3()
         } else {
-            theme::RED.gamma_multiply(0.9)
+            theme::RED().gamma_multiply(0.9)
         },
     );
     ui.painter().text(
@@ -1362,19 +1518,19 @@ fn diff_stat(ui: &egui::Ui, right: egui::Pos2, added: u32, removed: u32) {
         a,
         f,
         if added == 0 {
-            t::TEXT_3
+            t::TEXT_3()
         } else {
-            theme::GREEN.gamma_multiply(0.9)
+            theme::GREEN().gamma_multiply(0.9)
         },
     );
 }
 
 fn status_style(s: FileStatus) -> (&'static str, Color32) {
     match s {
-        FileStatus::Added => ("A", theme::GREEN),
-        FileStatus::Modified => ("M", theme::AMBER),
-        FileStatus::Deleted => ("D", theme::RED),
-        FileStatus::Renamed => ("R", theme::BLUE),
+        FileStatus::Added => ("A", theme::GREEN()),
+        FileStatus::Modified => ("M", theme::AMBER()),
+        FileStatus::Deleted => ("D", theme::RED()),
+        FileStatus::Renamed => ("R", theme::BLUE()),
     }
 }
 
@@ -1396,6 +1552,31 @@ fn short(p: &Path) -> String {
 }
 
 /// Two-option segmented control.
+/// The branch's commits and the diff of one of them (`want`, else newest).
+fn commits_diff(dir: &std::path::Path, want: Option<&str>) -> Result<ReviewDiff, String> {
+    let root = git::repo_root(dir)
+        .ok_or_else(|| format!("{} is not inside a git repository", dir.display()))?;
+    let (list, base) = git::commits(&root)?;
+    let shown = want
+        .and_then(|w| list.iter().find(|c| c.sha == w))
+        .or_else(|| list.first())
+        .cloned();
+    let files = match &shown {
+        Some(c) => git::commit_diff(&root, &c.sha)?,
+        None => vec![],
+    };
+    Ok(ReviewDiff {
+        branch: git::current_branch(&root),
+        root,
+        files,
+        scope: DiffScope::Commits,
+        base,
+        ahead: list.len() as u32,
+        commits: list,
+        commit: shown,
+    })
+}
+
 fn seg2<T: PartialEq + Copy>(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
@@ -1418,7 +1599,7 @@ fn seg<T: PartialEq + Copy>(
         .iter()
         .map(|(_, l)| {
             ui.fonts_mut(|f| {
-                f.layout_no_wrap((*l).into(), font.clone(), t::TEXT)
+                f.layout_no_wrap((*l).into(), font.clone(), t::TEXT())
                     .size()
                     .x
             }) + 24.0
@@ -1427,7 +1608,7 @@ fn seg<T: PartialEq + Copy>(
     let total: f32 = widths.iter().sum::<f32>() + 4.0;
     let (rect, _) = ui.allocate_exact_size(vec2(total, 26.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(7), t::BG_MAIN);
+        .rect_filled(rect, CornerRadius::same(7), t::BG_MAIN());
     let base = ui.id().with(id);
     let mut x = rect.min.x + 2.0;
     for ((opt, label), w) in opts.iter().zip(widths) {
@@ -1436,12 +1617,12 @@ fn seg<T: PartialEq + Copy>(
         let on = *value == *opt;
         if on {
             ui.painter()
-                .rect_filled(r, CornerRadius::same(5), t::ACTIVE);
+                .rect_filled(r, CornerRadius::same(5), t::ACTIVE());
         }
         let col = if on || resp.hovered() {
-            t::TEXT
+            t::TEXT()
         } else {
-            t::TEXT_3
+            t::TEXT_3()
         };
         ui.painter().text(
             r.center(),
@@ -1464,10 +1645,10 @@ fn empty_state(ui: &mut egui::Ui, title: &str, body: &str) {
     ui.add_space(48.0);
     ui.vertical_centered(|ui| {
         ui.set_max_width(360.0);
-        ui.label(RichText::new(title).size(15.0).color(t::TEXT_1));
+        ui.label(RichText::new(title).size(15.0).color(t::TEXT_1()));
         if !body.is_empty() {
             ui.add_space(4.0);
-            ui.label(RichText::new(body).size(12.5).color(t::TEXT_3));
+            ui.label(RichText::new(body).size(12.5).color(t::TEXT_3()));
         }
     });
 }

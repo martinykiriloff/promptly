@@ -153,6 +153,7 @@ pub fn diff(root: &Path, baselines: &Baselines) -> Result<ReviewDiff, String> {
         branch: git::current_branch(root),
         base: None,
         ahead: 0,
+        ..Default::default()
     })
 }
 

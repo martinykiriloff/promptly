@@ -530,7 +530,7 @@ impl Composer {
         }
         if let Some(n) = self.notice.clone() {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(n).size(12.0).color(theme::AMBER));
+                ui.label(RichText::new(n).size(12.0).color(theme::AMBER()));
                 if ui.small_button("Dismiss").clicked() {
                     self.notice = None;
                 }
@@ -541,8 +541,8 @@ impl Composer {
         // Chat-style input (as on claude.ai): a rounded box with the text on
         // top and a row of controls inside it, send button at the right.
         let card = egui::Frame::new()
-            .fill(t::BG_ELEVATED)
-            .stroke(Stroke::new(1.0, t::BORDER_STRONG))
+            .fill(t::BG_ELEVATED())
+            .stroke(Stroke::new(1.0, t::BORDER_STRONG()))
             .corner_radius(CornerRadius::same(16))
             .inner_margin(egui::Margin {
                 left: 16,
@@ -606,7 +606,7 @@ impl Composer {
                 .desired_rows(if self.shell_mode { 1 } else { 2 })
                 .desired_width(f32::INFINITY)
                 .font(font.clone())
-                .hint_text(RichText::new(hint).font(font).color(t::TEXT_3));
+                .hint_text(RichText::new(hint).font(font).color(t::TEXT_3()));
             let resp = ui.add(edit);
             if self.focus_requested {
                 resp.request_focus();
@@ -676,7 +676,7 @@ impl Composer {
                     ui.label(
                         RichText::new(format!("{m} · local"))
                             .size(12.5)
-                            .color(t::TEXT_2),
+                            .color(t::TEXT_2()),
                     )
                     .on_hover_text("This session runs on a local model through Ollama");
                 } else if self.claude_mode {
@@ -733,7 +733,7 @@ impl Composer {
             ui.painter().rect_stroke(
                 card_resp.response.rect,
                 CornerRadius::same(16),
-                Stroke::new(1.0, t::TEXT_3),
+                Stroke::new(1.0, t::TEXT_3()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -789,8 +789,8 @@ impl Composer {
             .saturating_sub(POPUP_ROWS - 1)
             .min(n.saturating_sub(POPUP_ROWS));
         egui::Frame::new()
-            .fill(t::BG_ELEVATED)
-            .stroke(Stroke::new(1.0, t::BORDER_STRONG))
+            .fill(t::BG_ELEVATED())
+            .stroke(Stroke::new(1.0, t::BORDER_STRONG()))
             .corner_radius(CornerRadius::same(10))
             .inner_margin(egui::Margin::same(6))
             .show(ui, |ui| {
@@ -801,10 +801,10 @@ impl Composer {
                     let sel = i == self.popup_sel;
                     if sel {
                         ui.painter()
-                            .rect_filled(rect, CornerRadius::same(6), t::ACTIVE);
+                            .rect_filled(rect, CornerRadius::same(6), t::ACTIVE());
                     } else if resp.hovered() {
                         ui.painter()
-                            .rect_filled(rect, CornerRadius::same(6), t::HOVER);
+                            .rect_filled(rect, CornerRadius::same(6), t::HOVER());
                     }
                     let y = rect.center().y;
                     match popup {
@@ -815,14 +815,14 @@ impl Composer {
                                 ui,
                                 &name,
                                 FontId::monospace(12.5),
-                                t::TEXT,
+                                t::TEXT(),
                                 rect.width() * 0.42,
                             );
                             let w = g.size().x;
                             ui.painter().galley(
                                 pos2(rect.min.x + 10.0, y - g.size().y / 2.0),
                                 g,
-                                t::TEXT,
+                                t::TEXT(),
                             );
                             let tag = if it.is_skill {
                                 format!("{} skill", it.source.label())
@@ -832,7 +832,7 @@ impl Composer {
                             let tag_col = if it.is_skill {
                                 egui::Color32::from_rgb(0xa9, 0x9c, 0xf7)
                             } else {
-                                t::TEXT_3
+                                t::TEXT_3()
                             };
                             let tag_r = Rect::from_min_size(
                                 pos2(rect.min.x + 18.0 + w, y - 9.0),
@@ -855,24 +855,24 @@ impl Composer {
                                 ui,
                                 &it.description,
                                 FontId::proportional(12.0),
-                                t::TEXT_3,
+                                t::TEXT_3(),
                                 (rect.max.x - dx - 8.0).max(10.0),
                             );
                             ui.painter()
-                                .galley(pos2(dx, y - g.size().y / 2.0), g, t::TEXT_3);
+                                .galley(pos2(dx, y - g.size().y / 2.0), g, t::TEXT_3());
                         }
                         Popup::Files(_, files) => {
                             let g = kit::elide(
                                 ui,
                                 &files[i],
                                 FontId::monospace(12.5),
-                                t::TEXT_1,
+                                t::TEXT_1(),
                                 rect.width() - 20.0,
                             );
                             ui.painter().galley(
                                 pos2(rect.min.x + 10.0, y - g.size().y / 2.0),
                                 g,
-                                t::TEXT_1,
+                                t::TEXT_1(),
                             );
                         }
                     }
@@ -889,7 +889,7 @@ impl Composer {
                     }
                     Popup::Files(..) => "↑↓ choose · ↵ or Tab insert · Esc close".to_string(),
                 };
-                ui.label(RichText::new(hint).size(11.0).color(t::TEXT_3));
+                ui.label(RichText::new(hint).size(11.0).color(t::TEXT_3()));
             });
         ui.add_space(4.0);
         picked
@@ -926,28 +926,28 @@ fn attachment_chip(ui: &mut egui::Ui, a: &Attachment) -> egui::Response {
     let font = FontId::proportional(12.0);
     let size = human_size(a.bytes);
     let name_w = ui
-        .fonts_mut(|f| f.layout_no_wrap(name.clone(), font.clone(), t::TEXT_1))
+        .fonts_mut(|f| f.layout_no_wrap(name.clone(), font.clone(), t::TEXT_1()))
         .size()
         .x
         .min(240.0);
     let size_w = ui
-        .fonts_mut(|f| f.layout_no_wrap(size.clone(), FontId::proportional(11.0), t::TEXT_3))
+        .fonts_mut(|f| f.layout_no_wrap(size.clone(), FontId::proportional(11.0), t::TEXT_3()))
         .size()
         .x;
     let w = 30.0 + name_w + 8.0 + size_w + 30.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
     let h = kit::hover_t(ui, &resp);
     let (icon, col) = match a.kind {
-        AttachKind::Image => (Icon::Image, theme::BLUE),
-        AttachKind::Pdf => (Icon::FileText, theme::RED),
-        AttachKind::Video => (Icon::Film, theme::AMBER),
-        AttachKind::File => (Icon::File, t::TEXT_2),
+        AttachKind::Image => (Icon::Image, theme::BLUE()),
+        AttachKind::Pdf => (Icon::FileText, theme::RED()),
+        AttachKind::Video => (Icon::Film, theme::AMBER()),
+        AttachKind::File => (Icon::File, t::TEXT_2()),
     };
     ui.painter().rect(
         rect,
         CornerRadius::same(8),
-        kit::mix(t::BG_ELEVATED, t::BG_ELEVATED_2, h),
-        Stroke::new(1.0, t::BORDER),
+        kit::mix(t::BG_ELEVATED(), t::BG_ELEVATED_2(), h),
+        Stroke::new(1.0, t::BORDER()),
         egui::StrokeKind::Inside,
     );
     kit::paint_icon(
@@ -956,24 +956,24 @@ fn attachment_chip(ui: &mut egui::Ui, a: &Attachment) -> egui::Response {
         icon,
         col,
     );
-    let g = kit::elide(ui, &name, font, t::TEXT_1, name_w);
+    let g = kit::elide(ui, &name, font, t::TEXT_1(), name_w);
     ui.painter().galley(
         pos2(rect.min.x + 30.0, rect.center().y - g.size().y / 2.0),
         g,
-        t::TEXT_1,
+        t::TEXT_1(),
     );
     ui.painter().text(
         pos2(rect.min.x + 30.0 + name_w + 8.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         size,
         FontId::proportional(11.0),
-        t::TEXT_3,
+        t::TEXT_3(),
     );
     kit::paint_icon(
         ui,
         egui::Rect::from_center_size(pos2(rect.max.x - 15.0, rect.center().y), vec2(12.0, 12.0)),
         Icon::Close,
-        kit::mix(t::TEXT_3, t::TEXT, h),
+        kit::mix(t::TEXT_3(), t::TEXT(), h),
     );
     let hover = match a.kind {
         AttachKind::Video => {
@@ -988,8 +988,8 @@ fn attachment_chip(ui: &mut egui::Ui, a: &Attachment) -> egui::Response {
 /// Shows what Enter does in a shell pane; click to switch.
 fn intent_chip(ui: &mut egui::Ui, intent: Intent) -> egui::Response {
     let (icon, label, col) = match intent {
-        Intent::Ask => (Icon::Sparkle, "Ask Claude for a command", t::ACCENT_HOVER),
-        Intent::Command => (Icon::Terminal, "Run in shell", t::TEXT_2),
+        Intent::Ask => (Icon::Sparkle, "Ask Claude for a command", t::ACCENT_HOVER()),
+        Intent::Command => (Icon::Terminal, "Run in shell", t::TEXT_2()),
     };
     let font = FontId::proportional(11.5);
     let w = ui
@@ -1062,7 +1062,7 @@ mod keys {
 fn picker(ui: &mut egui::Ui, label: &str, tip: &str) -> egui::Response {
     let font = FontId::proportional(12.5);
     let w = ui
-        .fonts_mut(|f| f.layout_no_wrap(label.into(), font.clone(), t::TEXT_2))
+        .fonts_mut(|f| f.layout_no_wrap(label.into(), font.clone(), t::TEXT_2()))
         .size()
         .x
         + 30.0;
@@ -1071,9 +1071,9 @@ fn picker(ui: &mut egui::Ui, label: &str, tip: &str) -> egui::Response {
     ui.painter().rect_filled(
         rect,
         CornerRadius::same(7),
-        kit::mix(egui::Color32::TRANSPARENT, t::HOVER, h),
+        kit::mix(egui::Color32::TRANSPARENT, t::HOVER(), h),
     );
-    let col = kit::mix(t::TEXT_2, t::TEXT, h);
+    let col = kit::mix(t::TEXT_2(), t::TEXT(), h);
     ui.painter().text(
         pos2(rect.min.x + 10.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -1098,21 +1098,21 @@ fn option_item(ui: &mut egui::Ui, name: &str, note: &str) -> bool {
     ui.painter().rect_filled(
         rect,
         CornerRadius::same(6),
-        kit::mix(egui::Color32::TRANSPARENT, t::HOVER, h),
+        kit::mix(egui::Color32::TRANSPARENT, t::HOVER(), h),
     );
     ui.painter().text(
         pos2(rect.min.x + 10.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         name,
         FontId::proportional(13.0),
-        t::TEXT,
+        t::TEXT(),
     );
     ui.painter().text(
         pos2(rect.max.x - 10.0, rect.center().y),
         egui::Align2::RIGHT_CENTER,
         note,
         FontId::proportional(11.5),
-        t::TEXT_3,
+        t::TEXT_3(),
     );
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
@@ -1125,20 +1125,20 @@ fn menu_item(ui: &mut egui::Ui, icon: Icon, label: &str) -> bool {
     ui.painter().rect_filled(
         rect,
         CornerRadius::same(6),
-        kit::mix(egui::Color32::TRANSPARENT, t::HOVER, h),
+        kit::mix(egui::Color32::TRANSPARENT, t::HOVER(), h),
     );
     kit::paint_icon(
         ui,
         egui::Rect::from_center_size(pos2(rect.min.x + 15.0, rect.center().y), vec2(14.0, 14.0)),
         icon,
-        t::TEXT_2,
+        t::TEXT_2(),
     );
     ui.painter().text(
         pos2(rect.min.x + 32.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         FontId::proportional(13.0),
-        t::TEXT,
+        t::TEXT(),
     );
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()

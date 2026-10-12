@@ -371,3 +371,146 @@ fn local_model_e2e() {
     );
     assert_eq!(cost, None, "no fake cost for a local model");
 }
+
+/// Themes and the review's Commits view, on a throwaway repository.
+///   PROMPTLY_SHOTS=/tmp/s cargo test -p promptly themes_and_commits -- --ignored --nocapture
+#[test]
+#[ignore]
+fn themes_and_commits() {
+    use promptly_core::git::DiffScope;
+    use std::time::{Duration, Instant};
+    let dir = std::path::PathBuf::from(
+        std::env::var("PROMPTLY_SHOTS").unwrap_or_else(|_| "/tmp/promptly-shots".into()),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    // A repo: main, then a feature branch with three commits.
+    let repo = tmp.path().join("shop-api");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    let g = |args: &[&str]| {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.email=dev@example.com", "-c", "user.name=Martin"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{args:?}");
+    };
+    g(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), "# Shop API\n").unwrap();
+    std::fs::write(
+        repo.join("src/server.ts"),
+        "import express from \"express\";\nconst app = express();\napp.listen(3000);\n",
+    )
+    .unwrap();
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "Initial server"]);
+    g(&["checkout", "-qb", "feature/rate-limits"]);
+    std::fs::write(repo.join("src/rate-limit.ts"), "export function rateLimit(perMinute: number) {\n  const buckets = new Map<string, number>();\n  return (key: string) => {\n    const left = (buckets.get(key) ?? perMinute) - 1;\n    buckets.set(key, left);\n    return left >= 0;\n  };\n}\n").unwrap();
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "Add token-bucket rate limiter"]);
+    std::fs::write(repo.join("src/server.ts"), "import express from \"express\";\nimport { rateLimit } from \"./rate-limit\";\nconst app = express();\nconst allow = rateLimit(100);\napp.use((req, res, next) => (allow(req.ip) ? next() : res.sendStatus(429)));\napp.listen(3000);\n").unwrap();
+    g(&["commit", "-qam", "Use the limiter in the server"]);
+    std::fs::write(
+        repo.join("README.md"),
+        "# Shop API\n\n100 requests per minute per client.\n",
+    )
+    .unwrap();
+    g(&["commit", "-qam", "Document rate limits"]);
+
+    // SAFETY: test-only setup before any app threads start.
+    unsafe {
+        std::env::set_var("PROMPTLY_DATA_DIR", tmp.path().join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
+        for k in [
+            "PROMPTLY_CONTROL",
+            "PROMPTLY_SOCKET",
+            "PROMPTLY_TOKEN",
+            "PROMPTLY_SESSION",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_eframe(|cc| App::new(cc));
+    h.ctx.set_os(egui::os::OperatingSystem::Mac);
+    let pump = |h: &mut Harness<'_, App>, secs: f32| {
+        let t0 = Instant::now();
+        while t0.elapsed().as_secs_f32() < secs {
+            h.step();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let shot = |h: &mut Harness<'_, App>, name: &str| {
+        pump(h, 1.2);
+        h.render()
+            .expect("render")
+            .save(dir.join(format!("{name}.png")))
+            .unwrap();
+        println!("wrote {name}.png");
+    };
+    let id = h.state_mut().demo_shell(repo.to_str().unwrap()).unwrap();
+    pump(&mut h, 1.5);
+    // Colored output to show the terminal palette.
+    h.state().demo_type(id, b"clear; git log --oneline --graph --color=always --decorate; printf '\\e[31mred \\e[32mgreen \\e[33myellow \\e[34mblue \\e[35mmagenta \\e[36mcyan\\e[0m\\n'\r");
+    pump(&mut h, 1.0);
+
+    // Commits: newest by default, only that commit's files.
+    h.state_mut().demo_review(DiffScope::Commits, None);
+    pump(&mut h, 2.0);
+    let d = h.state().demo_review_shown().expect("commits loaded");
+    let subjects: Vec<_> = d.commits.iter().map(|c| c.subject.clone()).collect();
+    println!("commits: {subjects:?}");
+    assert_eq!(
+        subjects,
+        [
+            "Document rate limits",
+            "Use the limiter in the server",
+            "Add token-bucket rate limiter"
+        ]
+    );
+    assert_eq!(d.commit.as_ref().unwrap().subject, "Document rate limits");
+    let files: Vec<_> = d.files.iter().map(|f| f.path.clone()).collect();
+    assert_eq!(files, ["README.md"], "only the newest commit's files");
+    shot(&mut h, "commits-newest");
+
+    // Open an older commit: only its changes.
+    let older = d.commits[1].sha.clone();
+    h.state_mut().demo_review(DiffScope::Commits, Some(older));
+    pump(&mut h, 2.0);
+    let d = h.state().demo_review_shown().unwrap();
+    assert_eq!(
+        d.commit.as_ref().unwrap().subject,
+        "Use the limiter in the server"
+    );
+    let files: Vec<_> = d
+        .files
+        .iter()
+        .map(|f| (f.path.clone(), f.added, f.removed))
+        .collect();
+    println!("older commit files: {files:?}");
+    assert_eq!(files, [("src/server.ts".to_string(), 3, 0)]);
+    shot(&mut h, "commits-older");
+
+    // Themes: the picker, then the main window in a few of them.
+    h.state_mut().demo_settings_tab(2);
+    shot(&mut h, "theme-picker");
+    h.state_mut().demo_close_overlays();
+    for name in ["GitHub Light", "Dracula", "Tokyo Night", "Catppuccin Mocha"] {
+        h.state_mut().demo_theme(name);
+        shot(
+            &mut h,
+            &format!("theme-{}", name.to_lowercase().replace(' ', "-")),
+        );
+    }
+    // Commits view in a light theme too.
+    h.state_mut().demo_theme("GitHub Light");
+    h.state_mut().demo_review(DiffScope::Commits, None);
+    shot(&mut h, "commits-light");
+    h.state_mut().demo_theme("Promptly");
+}

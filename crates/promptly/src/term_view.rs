@@ -100,7 +100,8 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
     let ppp = ui.ctx().pixels_per_point();
     let outer = ui.available_rect_before_wrap();
     // Breathing room around the grid; the padding is painted as terminal background.
-    ui.painter().rect_filled(outer, 0.0, theme::c32(theme::BG));
+    ui.painter()
+        .rect_filled(outer, 0.0, theme::c32(theme::BG()));
     let rect = outer
         .shrink2(vec2(16.0, 0.0))
         .with_min_y(outer.min.y + 12.0);
@@ -422,7 +423,7 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
 
     // ------------------------------------------------------------ paint
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::c32(theme::BG));
+    painter.rect_filled(rect, 0.0, theme::c32(theme::BG()));
     let content = term.renderable_content();
     let display_offset = content.display_offset;
     let colors = content.colors;
@@ -484,8 +485,8 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
             vec2(snap(cell.x * width) + 0.5, snap(cell.y) + 0.5),
         );
         if selected {
-            painter.rect_filled(cell_rect, 0.0, theme::SELECTION);
-        } else if bg != theme::BG {
+            painter.rect_filled(cell_rect, 0.0, theme::SELECTION());
+        } else if bg != theme::BG() {
             painter.rect_filled(cell_rect, 0.0, theme::c32(bg));
         }
         let mut color = theme::c32(fg);
@@ -569,7 +570,7 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
                 painter.rect_stroke(
                     r,
                     0.0,
-                    Stroke::new(1.0, theme::CURSOR),
+                    Stroke::new(1.0, theme::CURSOR()),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -577,18 +578,18 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
                 painter.rect_filled(
                     Rect::from_min_size(r.min, vec2(2.0, cell.y)),
                     0.0,
-                    theme::CURSOR,
+                    theme::CURSOR(),
                 );
             }
             (true, CursorShape::Underline) => {
                 painter.rect_filled(
                     Rect::from_min_size(pos2(x, y + cell.y - 2.0), vec2(cell.x, 2.0)),
                     0.0,
-                    theme::CURSOR,
+                    theme::CURSOR(),
                 );
             }
             (true, _) => {
-                painter.rect_filled(r, 0.0, theme::CURSOR.gamma_multiply(0.7));
+                painter.rect_filled(r, 0.0, theme::CURSOR().gamma_multiply(0.7));
             }
         }
         // IME candidate window follows the cursor.
@@ -610,7 +611,7 @@ pub fn show(ui: &mut egui::Ui, pane: &Pane, st: &mut ViewState, opts: &ViewOptio
             egui::Align2::RIGHT_TOP,
             label,
             FontId::proportional(11.0),
-            theme::MUTED,
+            theme::MUTED(),
         );
     }
     out

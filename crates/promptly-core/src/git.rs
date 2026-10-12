@@ -227,6 +227,22 @@ pub enum DiffScope {
     /// Files this session's agent edited, against their state before the
     /// first edit. Works outside git repositories.
     Session,
+    /// One commit at a time, picked from the branch's commits.
+    Commits,
+}
+
+/// A commit in the review's Commits list.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub short: String,
+    pub subject: String,
+    pub author: String,
+    /// "2 hours ago".
+    pub when: String,
+    pub files: u32,
+    pub added: u32,
+    pub removed: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -239,6 +255,9 @@ pub struct ReviewDiff {
     pub base: Option<String>,
     /// Commits on this branch that the base doesn't have.
     pub ahead: u32,
+    /// Commits scope: the list, and the one shown.
+    pub commits: Vec<CommitInfo>,
+    pub commit: Option<CommitInfo>,
 }
 
 impl ReviewDiff {
@@ -299,6 +318,116 @@ pub fn review_diff(dir: &Path, scope: DiffScope) -> Result<ReviewDiff, String> {
     out.files = diff_against(&root, None)?;
     out.scope = DiffScope::Uncommitted;
     Ok(out)
+}
+
+/// How many commits the Commits list shows when there's no branch range.
+pub const RECENT_COMMITS: usize = 50;
+
+/// The branch's commits (since it left its base, like a pull request's
+/// Commits tab), newest first; on the base branch itself, recent history.
+/// Returns the commits and the base they're measured against.
+pub fn commits(dir: &Path) -> Result<(Vec<CommitInfo>, Option<String>), String> {
+    let root = repo_root(dir)
+        .ok_or_else(|| format!("{} is not inside a git repository", dir.display()))?;
+    if run_stdout(git(&root).args(["rev-parse", "--verify", "--quiet", "HEAD"])).is_none() {
+        return Ok((vec![], None)); // no commits yet
+    }
+    let branch = current_branch(&root);
+    let mut range = "HEAD".to_string();
+    let mut base_used = None;
+    if let Some(base) = default_base(&root) {
+        let base_short = base.trim_start_matches("origin/");
+        let on_base = branch
+            .as_deref()
+            .is_some_and(|b| b == base || b == base_short);
+        if !on_base && let Some(mb) = run_stdout(git(&root).args(["merge-base", "HEAD", &base])) {
+            range = format!("{mb}..HEAD");
+            base_used = Some(base);
+        }
+    }
+    let limit = RECENT_COMMITS.to_string();
+    let out = git(&root)
+        .args([
+            "-c",
+            "core.quotepath=off",
+            "log",
+            "--no-color",
+            "--shortstat",
+            "--format=%x1e%H%x1f%h%x1f%s%x1f%an%x1f%cr",
+            "-n",
+            &limit,
+            &range,
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok((parse_log(&String::from_utf8_lossy(&out.stdout)), base_used))
+}
+
+/// Parse `git log --shortstat --format=%x1e%H%x1f%h%x1f%s%x1f%an%x1f%cr`.
+fn parse_log(text: &str) -> Vec<CommitInfo> {
+    text.split('\u{1e}')
+        .filter(|r| !r.trim().is_empty())
+        .filter_map(|rec| {
+            let mut lines = rec.lines();
+            let head: Vec<&str> = lines.next()?.split('\u{1f}').collect();
+            if head.len() < 5 {
+                return None;
+            }
+            let mut c = CommitInfo {
+                sha: head[0].into(),
+                short: head[1].into(),
+                subject: head[2].into(),
+                author: head[3].into(),
+                when: head[4].into(),
+                ..Default::default()
+            };
+            // " 3 files changed, 10 insertions(+), 2 deletions(-)"
+            for part in lines.flat_map(|l| l.split(',')) {
+                let n: u32 = part
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
+                if part.contains("file") {
+                    c.files = n;
+                } else if part.contains("insertion") {
+                    c.added = n;
+                } else if part.contains("deletion") {
+                    c.removed = n;
+                }
+            }
+            Some(c)
+        })
+        .collect()
+}
+
+/// The changes one commit made (against its first parent).
+pub fn commit_diff(dir: &Path, sha: &str) -> Result<Vec<FileDiff>, String> {
+    let root = repo_root(dir)
+        .ok_or_else(|| format!("{} is not inside a git repository", dir.display()))?;
+    let out = git(&root)
+        .args([
+            "-c",
+            "core.quotepath=off",
+            "show",
+            "--no-color",
+            "--no-ext-diff",
+            "-M",
+            "--first-parent",
+            "--format=",
+            sha,
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let mut files = parse_unified(&String::from_utf8_lossy(&out.stdout));
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
 }
 
 /// Working tree vs `rev` (or HEAD), plus untracked files.
@@ -664,5 +793,70 @@ index 1..2 100644
 
         let e = review_diff(t.path(), DiffScope::Branch).unwrap_err();
         assert!(e.contains("is not inside a git repository"), "{e}");
+    }
+
+    #[test]
+    fn commits_list_and_single_commit_diff() {
+        let t = tempfile::tempdir().unwrap();
+        let repo = t.path().join("r");
+        std::fs::create_dir(&repo).unwrap();
+        let g = |args: &[&str]| {
+            let o = git(&repo)
+                .args(["-c", "user.email=t@t", "-c", "user.name=Tess"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        g(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "base"]);
+        g(&["checkout", "-qb", "feature"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        g(&["commit", "-qam", "Add two"]);
+        std::fs::write(repo.join("b.txt"), "new\nfile\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "ONE\ntwo\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "Add b, shout one"]);
+
+        let (list, base) = commits(&repo).unwrap();
+        assert_eq!(base.as_deref(), Some("main"));
+        let subjects: Vec<_> = list.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(
+            subjects,
+            ["Add b, shout one", "Add two"],
+            "branch commits, newest first"
+        );
+        assert_eq!(list[0].author, "Tess");
+        assert_eq!((list[0].files, list[0].added, list[0].removed), (2, 3, 1));
+        assert_eq!((list[1].files, list[1].added, list[1].removed), (1, 1, 0));
+
+        // A commit's diff holds only that commit's changes.
+        let first = commit_diff(&repo, &list[1].sha).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            (first[0].path.as_str(), first[0].added, first[0].removed),
+            ("a.txt", 1, 0)
+        );
+        let second = commit_diff(&repo, &list[0].short).unwrap();
+        let paths: Vec<_> = second.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt", "b.txt"]);
+        assert_eq!(second[1].status, FileStatus::Added);
+
+        // On the base branch: recent history instead of a range.
+        g(&["checkout", "-q", "main"]);
+        let (list, base) = commits(&repo).unwrap();
+        assert_eq!(base, None);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].subject, "base");
+
+        // The root commit diffs against nothing.
+        let root = commit_diff(&repo, &list[0].sha).unwrap();
+        assert_eq!(root[0].status, FileStatus::Added);
     }
 }

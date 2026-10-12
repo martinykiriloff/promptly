@@ -28,11 +28,11 @@ pub fn tween(
 /// Level of a plan limit: label + color, so color is never the only cue.
 pub fn limit_level(pct: f32) -> (&'static str, Color32) {
     if pct >= 90.0 {
-        ("Near limit", theme::RED)
+        ("Near limit", theme::RED())
     } else if pct >= 70.0 {
-        ("High", theme::AMBER)
+        ("High", theme::AMBER())
     } else {
-        ("OK", t::TEXT_1)
+        ("OK", t::TEXT_1())
     }
 }
 
@@ -40,7 +40,7 @@ pub fn limit_level(pct: f32) -> (&'static str, Color32) {
 pub fn limit_bar(ui: &mut Ui, frac: f32, color: Color32, width: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 6.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(3), t::BORDER);
+        .rect_filled(rect, CornerRadius::same(3), t::BORDER());
     let mut fill = rect;
     fill.set_width((rect.width() * frac.clamp(0.0, 1.0)).max(if frac > 0.0 { 6.0 } else { 0.0 }));
     ui.painter().rect_filled(fill, CornerRadius::same(3), color);
@@ -61,7 +61,7 @@ pub fn sparkline(
     let p = ui.painter_at(rect.expand(4.0));
     p.line_segment(
         [rect.left_bottom(), rect.right_bottom()],
-        Stroke::new(1.0, t::BORDER),
+        Stroke::new(1.0, t::BORDER()),
     );
     if points.len() < 2 {
         p.text(
@@ -69,7 +69,7 @@ pub fn sparkline(
             egui::Align2::CENTER_CENTER,
             "collecting…",
             FontId::proportional(10.5),
-            t::TEXT_3,
+            t::TEXT_3(),
         );
         return resp;
     }
@@ -110,7 +110,7 @@ pub fn sparkline(
     }
     p.add(egui::Shape::line(line.clone(), Stroke::new(1.5, color)));
     let end = *line.last().unwrap();
-    p.circle_filled(end, 3.5, t::BG_SIDEBAR);
+    p.circle_filled(end, 3.5, t::BG_SIDEBAR());
     p.circle_filled(end, 2.5, color);
     // Crosshair + tooltip on hover.
     if let Some(h) = resp.hover_pos() {
@@ -122,7 +122,7 @@ pub fn sparkline(
             let at = to(x, y);
             p.line_segment(
                 [pos2(at.x, rect.min.y), pos2(at.x, rect.max.y)],
-                Stroke::new(1.0, t::BORDER_STRONG),
+                Stroke::new(1.0, t::BORDER_STRONG()),
             );
             p.circle_filled(at, 3.0, color);
             return resp.on_hover_text_at_pointer(tooltip(x, y));
@@ -142,7 +142,7 @@ pub fn hourly_bars(ui: &mut Ui, hours: &[u64; 24], current_hour: usize, size: eg
     let bw = (plot.width() - gap * 23.0) / 24.0;
     p.line_segment(
         [plot.left_bottom(), plot.right_bottom()],
-        Stroke::new(1.0, t::BORDER),
+        Stroke::new(1.0, t::BORDER()),
     );
     let mut hovered = None;
     for (h, &v) in hours.iter().enumerate() {
@@ -155,9 +155,9 @@ pub fn hourly_bars(ui: &mut Ui, hours: &[u64; 24], current_hour: usize, size: eg
                 pos2(x + bw, plot.max.y),
             );
             let color = if h == current_hour {
-                theme::BLUE
+                theme::BLUE()
             } else {
-                theme::BLUE.gamma_multiply(0.45)
+                theme::BLUE().gamma_multiply(0.45)
             };
             p.rect_filled(
                 bar,
@@ -184,7 +184,7 @@ pub fn hourly_bars(ui: &mut Ui, hours: &[u64; 24], current_hour: usize, size: eg
                 egui::Align2::LEFT_BOTTOM,
                 format!("{h:02}:00"),
                 FontId::proportional(10.0),
-                t::TEXT_3,
+                t::TEXT_3(),
             );
         }
     }
@@ -200,20 +200,20 @@ pub fn hourly_bars(ui: &mut Ui, hours: &[u64; 24], current_hour: usize, size: eg
 /// Labelled number tile.
 pub fn stat_tile(ui: &mut Ui, label: &str, value: &str, detail: &str, width: f32) {
     egui::Frame::new()
-        .fill(t::BG_SIDEBAR)
-        .stroke(Stroke::new(1.0, t::BORDER))
+        .fill(t::BG_SIDEBAR())
+        .stroke(Stroke::new(1.0, t::BORDER()))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.set_width(width - 30.0);
-                ui.label(egui::RichText::new(label).size(12.0).color(t::TEXT_2));
+                ui.label(egui::RichText::new(label).size(12.0).color(t::TEXT_2()));
                 ui.add(
-                    egui::Label::new(egui::RichText::new(value).size(24.0).color(t::TEXT))
+                    egui::Label::new(egui::RichText::new(value).size(24.0).color(t::TEXT()))
                         .truncate(),
                 );
                 ui.add(
-                    egui::Label::new(egui::RichText::new(detail).size(11.5).color(t::TEXT_3))
+                    egui::Label::new(egui::RichText::new(detail).size(11.5).color(t::TEXT_3()))
                         .truncate(),
                 );
             });
