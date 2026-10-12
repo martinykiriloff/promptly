@@ -167,6 +167,9 @@ pub fn primary_button(
         text_w(ui, label, font.clone()) + sc_w + if icon.is_some() { 46.0 } else { 26.0 }
     };
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
     let h = hover_t(ui, &resp);
     let enabled = ui.is_enabled();
     let fill = if !enabled {
@@ -226,6 +229,9 @@ pub fn secondary_button(ui: &mut Ui, icon: Option<Icon>, label: &str) -> Respons
     let font = FontId::proportional(12.5);
     let w = text_w(ui, label, font.clone()) + if icon.is_some() { 42.0 } else { 24.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
     let h = hover_t(ui, &resp);
     ui.painter().rect(
         rect,

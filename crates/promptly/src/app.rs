@@ -10,6 +10,7 @@ use promptly_core::index::{SessionIndex, SessionRecord};
 use promptly_core::ipc::{self, ControlRequest, Incoming, Server};
 use promptly_core::sanitize;
 use promptly_core::state::SessionState;
+use promptly_core::transcript::StepKind;
 use promptly_core::util;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -85,6 +86,7 @@ enum Action {
     SwitchAccount,
     AddAccount,
     AskCommand,
+    Export,
 }
 
 const ACTIONS: &[(Action, &str, &str, &str)] = &[
@@ -141,7 +143,7 @@ const ACTIONS: &[(Action, &str, &str, &str)] = &[
     (
         Action::ToggleGrid,
         "toggle_grid",
-        "Toggle session grid",
+        "Show all sessions (board)",
         "primary+g",
     ),
     (
@@ -245,6 +247,12 @@ const ACTIONS: &[(Action, &str, &str, &str)] = &[
         "Ask Claude for a shell command",
         "primary+i",
     ),
+    (
+        Action::Export,
+        "export_session",
+        "Export conversation as Markdown",
+        "",
+    ),
 ];
 
 struct Palette {
@@ -307,6 +315,15 @@ pub struct App {
     key_overrides: std::collections::BTreeMap<String, String>,
     /// Settings > Shortcuts is waiting for keys for this action.
     capturing: Option<&'static str>,
+    /// Spending caps (USD); None = no cap.
+    session_budget: Option<f64>,
+    daily_budget: Option<f64>,
+    /// Crash reports from earlier runs, waiting for the user's choice.
+    crashes: Vec<PathBuf>,
+    /// The user turned off the crash-report offer.
+    crash_ask_off: bool,
+    /// Saved prompts (Settings > Prompts, and the input's + menu).
+    prompts: Vec<promptly_core::prompts::SavedPrompt>,
     /// Installed monospace families, loaded when Settings first needs them.
     mono_families: Arc<Mutex<Option<Vec<String>>>>,
     /// Name typed in the "Add account" sheet, while it is open.
@@ -317,6 +334,9 @@ pub struct App {
     log_open: bool,
     transcript_open: bool,
     grid_mode: bool,
+    /// The overview's layout, and the session shown in its details panel.
+    board_view: BoardView,
+    board_pick: Option<PaneId>,
     usage_mode: bool,
     reduce_motion: bool,
     /// Off by default: show Claude's thinking (Settings › Claude).
@@ -353,6 +373,7 @@ impl App {
         let (cfg, cfg_error) = Config::load();
         let early = Prefs::load();
         crate::fonts::install(&ctx, &early.terminal_font);
+        theme::load_custom();
         theme::set(&early.theme);
         theme::apply_chrome(&ctx, false);
         let _ = shell_integration::install();
@@ -484,6 +505,11 @@ impl App {
             theme_name: theme::DEFAULT.into(),
             key_overrides: Default::default(),
             capturing: None,
+            session_budget: None,
+            daily_budget: None,
+            crashes: promptly_core::crash::pending_in(&promptly_core::crash::dir()),
+            crash_ask_off: false,
+            prompts: promptly_core::prompts::load(),
             mono_families: Arc::default(),
             add_account: None,
             accounts_checked: Instant::now(),
@@ -491,6 +517,8 @@ impl App {
             log_open: false,
             transcript_open: false,
             grid_mode: false,
+            board_view: BoardView::default(),
+            board_pick: None,
             usage_mode: false,
             reduce_motion: false,
             show_thinking: false,
@@ -529,6 +557,16 @@ impl App {
         app.ligatures = prefs.ligatures;
         app.theme_name = theme::current().name.to_string();
         app.key_overrides = prefs.keybindings.clone();
+        app.session_budget = prefs.session_budget;
+        app.crash_ask_off = prefs.crash_ask_off;
+        if app.crash_ask_off {
+            promptly_core::crash::dismiss(&std::mem::take(&mut app.crashes));
+        }
+        app.daily_budget = prefs.daily_budget;
+        app.core.lock().budgets = crate::session::Budgets {
+            session: app.session_budget,
+            daily: app.daily_budget,
+        };
         app.shortcuts = build_shortcuts(&app.cfg, &app.key_overrides);
         {
             let known = app.known_commands.clone();
@@ -1377,6 +1415,17 @@ impl App {
                 };
                 self.switch_account(&next);
             }
+            Action::Export => {
+                if let Some(id) = self.active {
+                    match self.export_session(id) {
+                        Ok(path) => {
+                            reveal_in_finder(&path);
+                            self.toast(format!("Saved {}", short_path(&path.to_string_lossy())));
+                        }
+                        Err(e) => self.toast(format!("Couldn't export: {e}")),
+                    }
+                }
+            }
             Action::AddAccount => self.add_account = Some(String::new()),
             Action::AskCommand => {
                 self.composer_open = true;
@@ -1538,6 +1587,309 @@ impl App {
         };
         if let Some(e) = self.panes.get(&id) {
             e.pane.write(keys);
+        }
+    }
+
+    /// Write a session's conversation and changes as Markdown in Downloads.
+    fn export_session(&self, id: PaneId) -> Result<PathBuf, String> {
+        let (title, cwd, branch, model, account, transcript, base, live) = {
+            let c = self.core.lock();
+            let m = c.sessions.get(&id).ok_or("No session")?;
+            if !m.is_claude() {
+                return Err("only Claude sessions have a conversation".into());
+            }
+            (
+                m.display_name(),
+                m.cwd.clone(),
+                m.branch.clone(),
+                m.status.model.clone(),
+                c.account_tag(&m.account),
+                m.transcript_path.clone(),
+                m.baselines.clone(),
+                m.steps.iter().cloned().collect::<Vec<_>>(),
+            )
+        };
+        let mut changes = promptly_core::session_changes::diff(&cwd, &base)
+            .map(|d| d.files)
+            .unwrap_or_default();
+        if changes.is_empty() {
+            changes = promptly_core::git::working_diff(&cwd).unwrap_or_default();
+        }
+        // The transcript file, or what Promptly has seen live when the file
+        // isn't written yet (or the live view has more).
+        let file = transcript
+            .map(|t| promptly_core::export::read_steps(&t))
+            .unwrap_or_default();
+        let steps = if live.len() > file.len() { live } else { file };
+        if steps.is_empty() {
+            return Err("nothing to export yet".into());
+        }
+        let md = promptly_core::export::markdown(
+            &promptly_core::export::Meta {
+                title: &title,
+                folder: &short_path(&cwd.to_string_lossy()),
+                branch: branch.as_deref(),
+                model: model.as_deref(),
+                account: account.as_deref(),
+            },
+            &steps,
+            &changes,
+        );
+        let dir = promptly_core::paths::home().join("Downloads");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join(promptly_core::export::file_name(
+            &title,
+            &chrono::Local::now().format("%Y-%m-%d-%H%M").to_string(),
+        ));
+        std::fs::write(&path, md).map_err(|e| e.to_string())?;
+        Ok(path)
+    }
+
+    /// Settings > Claude Code: the account's permission rules (editable),
+    /// MCP servers and skills.
+    fn claude_code_section(&mut self, ui: &mut egui::Ui) {
+        use promptly_core::claude_settings as cs;
+        use theme::tokens as t;
+        let (dir, label, home_json) = {
+            let c = self.core.lock();
+            let a = self
+                .active
+                .and_then(|id| c.sessions.get(&id))
+                .and_then(|m| c.account(&m.account))
+                .unwrap_or_else(|| c.active());
+            (
+                a.dir.clone(),
+                a.label(),
+                a.identity_file(&promptly_core::paths::home()),
+            )
+        };
+        let path = cs::settings_path(&dir);
+        let mut rules = cs::read_rules(&path);
+        ui.label(
+            RichText::new(format!("{label} · {}", short_path(&path.to_string_lossy())))
+                .size(12.0)
+                .color(t::TEXT_3()),
+        );
+        ui.add_space(10.0);
+        let mut changed = false;
+        for (title, list) in [
+            ("Allowed without asking", &mut rules.allow),
+            ("Always ask", &mut rules.ask),
+            ("Never allowed", &mut rules.deny),
+        ] {
+            let mut remove = None;
+            kit::settings_group(ui, Some(title), |ui| {
+                if list.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("None").size(12.0).color(t::TEXT_3()));
+                    ui.add_space(8.0);
+                }
+                for (i, rule) in list.iter().enumerate() {
+                    let warn = cs::rule_warning(rule).unwrap_or_default();
+                    kit::setting_row(ui, i == 0, rule, &warn, |ui| {
+                        if kit::icon_button(ui, Icon::Close, "Remove rule", false).clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+            });
+            if let Some(i) = remove {
+                list.remove(i);
+                changed = true;
+            }
+        }
+        let form_id = egui::Id::new("rule-form");
+        let (mut text, mut which): (String, usize) =
+            ui.data(|d| d.get_temp(form_id)).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut text)
+                    .hint_text("Bash(npm test:*)  or  Read  or  Edit(src/**)")
+                    .desired_width((ui.available_width() - 260.0).max(160.0))
+                    .font(FontId::monospace(12.5)),
+            );
+            for (i, l) in ["Allow", "Ask", "Deny"].iter().enumerate() {
+                if ui.selectable_label(which == i, *l).clicked() {
+                    which = i;
+                }
+            }
+            if kit::secondary_button(ui, Some(Icon::Plus), "Add rule").clicked()
+                && !text.trim().is_empty()
+            {
+                let list = match which {
+                    1 => &mut rules.ask,
+                    2 => &mut rules.deny,
+                    _ => &mut rules.allow,
+                };
+                if !list.iter().any(|r| r == text.trim()) {
+                    list.push(text.trim().to_string());
+                    changed = true;
+                }
+                text.clear();
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(form_id, (text, which)));
+        if changed {
+            match cs::write_rules(&path, &rules) {
+                Ok(()) => self.toast("Saved. New Claude sessions use these rules."),
+                Err(e) => self.toast(format!("Couldn't save: {e}")),
+            }
+        }
+        ui.add_space(14.0);
+        let servers = cs::mcp_servers(&home_json, &path);
+        kit::settings_group(ui, Some("MCP servers"), |ui| {
+            if servers.is_empty() {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("None configured")
+                        .size(12.0)
+                        .color(t::TEXT_3()),
+                );
+                ui.add_space(8.0);
+            }
+            for (i, (name, how)) in servers.iter().enumerate() {
+                kit::setting_row(ui, i == 0, name, how, |_| {});
+            }
+        });
+        let skills: Vec<_> = promptly_core::commands::discover(&promptly_core::paths::home(), &dir)
+            .into_iter()
+            .filter(|i| i.source != promptly_core::commands::Source::BuiltIn)
+            .collect();
+        kit::settings_group(
+            ui,
+            Some(&format!("Commands and skills ({})", skills.len())),
+            |ui| {
+                if skills.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("None").size(12.0).color(t::TEXT_3()));
+                    ui.add_space(8.0);
+                }
+                for (i, it) in skills.iter().take(60).enumerate() {
+                    kit::setting_row(
+                        ui,
+                        i == 0,
+                        &format!("/{}", it.name),
+                        &it.description,
+                        |_| {},
+                    );
+                }
+            },
+        );
+    }
+
+    /// Settings > Prompts: saved prompts with {{variables}}.
+    fn prompts_section(&mut self, ui: &mut egui::Ui) {
+        use promptly_core::prompts::{self as pr, SavedPrompt};
+        use theme::tokens as t;
+        let project = self.active.and_then(|id| {
+            let c = self.core.lock();
+            c.sessions
+                .get(&id)
+                .map(|m| promptly_core::git::repo_root(&m.cwd).unwrap_or_else(|| m.cwd.clone()))
+        });
+        let form_id = egui::Id::new("prompt-form");
+        // (index being edited or usize::MAX for a new one, name, body, this project only)
+        let mut form: (usize, String, String, bool) = ui.data(|d| d.get_temp(form_id)).unwrap_or((
+            usize::MAX,
+            String::new(),
+            String::new(),
+            false,
+        ));
+        let mut changed = false;
+        let mut delete = None;
+        kit::settings_group(ui, Some("Saved prompts"), |ui| {
+            if self.prompts.is_empty() {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "None yet. Add one below; use {{name}} for blanks you fill in each time.",
+                    )
+                    .size(12.0)
+                    .color(t::TEXT_3()),
+                );
+                ui.add_space(8.0);
+            }
+            for (i, p) in self.prompts.iter().enumerate() {
+                let scope = match &p.project {
+                    Some(r) => format!("Only in {}", short_path(&r.to_string_lossy())),
+                    None => "Every project".into(),
+                };
+                let vars = pr::variables(&p.body);
+                let detail = if vars.is_empty() {
+                    scope
+                } else {
+                    format!("{scope} · asks for {}", vars.join(", "))
+                };
+                kit::setting_row(ui, i == 0, &p.name, &detail, |ui| {
+                    if kit::icon_button(ui, Icon::Close, "Delete", false).clicked() {
+                        delete = Some(i);
+                    }
+                    if kit::secondary_button(ui, None, "Edit").clicked() {
+                        form = (i, p.name.clone(), p.body.clone(), p.project.is_some());
+                    }
+                });
+            }
+        });
+        if let Some(i) = delete {
+            self.prompts.remove(i);
+            changed = true;
+        }
+        ui.label(
+            RichText::new(if form.0 == usize::MAX {
+                "New prompt"
+            } else {
+                "Edit prompt"
+            })
+            .size(12.0)
+            .strong()
+            .color(t::TEXT_2()),
+        );
+        ui.add_space(4.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut form.1)
+                .hint_text("Name")
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(4.0);
+        ui.add(
+            egui::TextEdit::multiline(&mut form.2)
+                .hint_text("Review {{file}} for security issues and suggest fixes.")
+                .desired_rows(4)
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if let Some(p) = &project {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                ui.checkbox(&mut form.3, format!("Only in {name}"))
+                    .on_hover_text(short_path(&p.to_string_lossy()));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let ok = !form.1.trim().is_empty() && !form.2.trim().is_empty();
+                ui.add_enabled_ui(ok, |ui| {
+                    if kit::secondary_button(ui, Some(Icon::Check), "Save prompt").clicked() {
+                        let sp = SavedPrompt {
+                            name: form.1.trim().to_string(),
+                            body: form.2.clone(),
+                            project: if form.3 { project.clone() } else { None },
+                        };
+                        if form.0 < self.prompts.len() {
+                            self.prompts[form.0] = sp;
+                        } else {
+                            self.prompts.push(sp);
+                        }
+                        form = (usize::MAX, String::new(), String::new(), false);
+                        changed = true;
+                    }
+                });
+            });
+        });
+        ui.data_mut(|d| d.insert_temp(form_id, form));
+        if changed && let Err(e) = pr::save(&self.prompts) {
+            self.toast(format!("Couldn't save prompts: {e}"));
         }
     }
 
@@ -2379,7 +2731,7 @@ impl App {
                 if kit::icon_button(ui, Icon::Sliders, "Settings", self.settings_open).clicked() {
                     actions.push(Action::Settings);
                 }
-                if kit::icon_button(ui, Icon::Grid, "Session grid", self.grid_mode).clicked() {
+                if kit::icon_button(ui, Icon::Grid, "All sessions", self.grid_mode).clicked() {
                     actions.push(Action::ToggleGrid);
                 }
                 if kit::icon_button(ui, Icon::Search, "Command palette", self.palette.is_some())
@@ -2426,6 +2778,9 @@ impl App {
             ligatures: self.ligatures,
             theme: self.theme_name.clone(),
             keybindings: self.key_overrides.clone(),
+            session_budget: self.session_budget,
+            daily_budget: self.daily_budget,
+            crash_ask_off: self.crash_ask_off,
         }
         .save();
     }
@@ -2779,6 +3134,8 @@ impl App {
             )
         };
         let reduce = self.reduce_motion;
+        let daily_budget = self.daily_budget;
+        let spent = self.core.lock().spend.total;
         let font = FontId::proportional(11.5);
         let mut open_usage = false;
         let mut open_accounts = false;
@@ -2897,6 +3254,21 @@ impl App {
                                     }
                                 }
                             };
+                            if let Some(b) = daily_budget {
+                                let col = if spent >= b {
+                                    theme::RED()
+                                } else if spent >= b * 0.8 {
+                                    theme::AMBER()
+                                } else {
+                                    t::TEXT_2()
+                                };
+                                ui.label(
+                                    RichText::new(format!("${spent:.2} / ${b:.0} today"))
+                                        .font(font.clone())
+                                        .color(col),
+                                );
+                                ui.add_space(16.0);
+                            }
                             limit(ui, "Week", &week, "week");
                             ui.add_space(16.0);
                             limit(ui, "5h", &five, "five");
@@ -3668,24 +4040,547 @@ impl App {
         ui.advance_cursor_after_rect(rect);
     }
 
+    /// One session's facts for the board, list and details panel.
+    fn card_info(&self, id: PaneId) -> Option<CardInfo> {
+        let c = self.core.lock();
+        let m = c.sessions.get(&id)?;
+        let st = m.state();
+        let claude = m.is_claude();
+        let lane = if !claude {
+            if m.command_running {
+                Lane::Working
+            } else {
+                Lane::Done
+            }
+        } else {
+            match st {
+                SessionState::WaitingPermission
+                | SessionState::WaitingInput
+                | SessionState::Error => Lane::NeedsYou,
+                SessionState::Starting | SessionState::Working => Lane::Working,
+                _ => Lane::Done,
+            }
+        };
+        Some(CardInfo {
+            id,
+            name: m.display_name(),
+            st,
+            claude,
+            lane,
+            detail: m.attention_detail.clone(),
+            branch: m.branch.clone(),
+            folder: short_path(&m.cwd.to_string_lossy()),
+            model: m.status.model.clone().or_else(|| m.stats.model.clone()),
+            cost: m.status.cost_usd,
+            account: c.account_tag(&m.account),
+            steps: m.steps.iter().rev().take(14).rev().cloned().collect(),
+            started: m.started,
+        })
+    }
+
+    /// The overview: every session as a board, a list, or live previews.
     fn grid(&mut self, ui: &mut egui::Ui) {
+        use theme::tokens as t;
         let rect = ui.available_rect_before_wrap();
         window_drag_zone(
             ui,
             egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 40.0)),
             "grid-drag",
         );
-        ui.add_space(10.0);
+        let ids = self.ordered_panes();
+        let cards: Vec<CardInfo> = ids.iter().filter_map(|id| self.card_info(*id)).collect();
+        if self.board_pick.is_some_and(|p| !ids.contains(&p)) {
+            self.board_pick = None;
+        }
+        ui.add_space(12.0);
         ui.horizontal(|ui| {
-            ui.add_space(16.0);
+            ui.add_space(20.0);
             ui.label(
                 RichText::new("All sessions")
                     .size(15.0)
-                    .color(theme::tokens::TEXT()),
+                    .strong()
+                    .color(t::TEXT()),
             );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(cards.len().to_string())
+                    .size(12.0)
+                    .color(t::TEXT_3()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(20.0);
+                crate::review::seg(
+                    ui,
+                    "board-view",
+                    &mut self.board_view,
+                    &[
+                        (BoardView::Board, "Board"),
+                        (BoardView::List, "List"),
+                        (BoardView::Sessions, "Sessions"),
+                    ],
+                );
+            });
         });
+        ui.add_space(12.0);
+        let mut open = None;
+        let mut answer: Option<(PaneId, u8)> = None;
+        let body = ui.available_rect_before_wrap();
+        let show_details = self.board_view != BoardView::Sessions && self.board_pick.is_some();
+        let details_w = 360.0;
+        let main = if show_details {
+            egui::Rect::from_min_max(body.min, egui::pos2(body.max.x - details_w, body.max.y))
+        } else {
+            body
+        };
+        let mut mu = ui.new_child(egui::UiBuilder::new().max_rect(main).id_salt("board-main"));
+        match self.board_view {
+            BoardView::Board => self.board_columns(&mut mu, &cards, &mut open, &mut answer),
+            BoardView::List => self.board_list(&mut mu, &cards, &mut open),
+            BoardView::Sessions => self.session_previews(&mut mu, &ids, &mut open),
+        }
+        if show_details && let Some(info) = cards.iter().find(|c| Some(c.id) == self.board_pick) {
+            let r = egui::Rect::from_min_max(egui::pos2(main.max.x, body.min.y), body.max);
+            ui.painter().rect_filled(r, 0.0, t::BG_SIDEBAR());
+            ui.painter().line_segment(
+                [r.left_top(), r.left_bottom()],
+                egui::Stroke::new(1.0, t::BORDER()),
+            );
+            let mut du = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(r.shrink2(egui::vec2(18.0, 4.0)))
+                    .id_salt("board-details"),
+            );
+            self.board_details(&mut du, info, &mut open, &mut answer);
+        }
+        ui.advance_cursor_after_rect(body);
+        if let Some((id, n)) = answer {
+            self.answer_permission(id, n);
+        }
+        if let Some(id) = open {
+            self.open_session(id);
+        }
+    }
+
+    fn board_columns(
+        &mut self,
+        ui: &mut egui::Ui,
+        cards: &[CardInfo],
+        open: &mut Option<PaneId>,
+        answer: &mut Option<(PaneId, u8)>,
+    ) {
+        use theme::tokens as t;
+        let area = ui
+            .available_rect_before_wrap()
+            .shrink2(egui::vec2(20.0, 0.0));
+        let gap = 14.0;
+        let w = (area.width() - gap * 2.0) / 3.0;
+        for (i, (lane, title, color)) in [
+            (Lane::NeedsYou, "Needs you", theme::AMBER()),
+            (Lane::Working, "Working", theme::BLUE()),
+            (Lane::Done, "Done", theme::GREEN()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let col = egui::Rect::from_min_size(
+                area.min + egui::vec2(i as f32 * (w + gap), 0.0),
+                egui::vec2(w, area.height()),
+            );
+            ui.painter()
+                .rect_filled(col, egui::CornerRadius::same(10), t::BG_SIDEBAR());
+            let mut cu = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(col.shrink(10.0))
+                    .id_salt(("lane", i))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            let in_lane: Vec<&CardInfo> = cards.iter().filter(|c| c.lane == lane).collect();
+            cu.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(r.center(), 3.5, color);
+                ui.label(RichText::new(title).size(12.5).strong().color(t::TEXT()));
+                ui.label(
+                    RichText::new(in_lane.len().to_string())
+                        .size(12.0)
+                        .color(t::TEXT_3()),
+                );
+            });
+            cu.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .id_salt(("lane-scroll", i))
+                .auto_shrink([false, false])
+                .show(&mut cu, |ui| {
+                    if in_lane.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(match lane {
+                                Lane::NeedsYou => "Nothing waiting on you",
+                                Lane::Working => "Nothing running",
+                                Lane::Done => "Nothing finished yet",
+                            })
+                            .size(12.0)
+                            .color(t::TEXT_3()),
+                        );
+                    }
+                    for c in in_lane {
+                        self.board_card(ui, c, open, answer);
+                        ui.add_space(8.0);
+                    }
+                });
+        }
+        ui.advance_cursor_after_rect(area);
+    }
+
+    fn board_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        c: &CardInfo,
+        open: &mut Option<PaneId>,
+        answer: &mut Option<(PaneId, u8)>,
+    ) {
+        use theme::tokens as t;
+        let picked = self.board_pick == Some(c.id);
+        let prompt = (c.st == SessionState::WaitingPermission)
+            .then(|| self.permission_prompt(c.id))
+            .flatten();
+        let frame = egui::Frame::new()
+            .fill(t::BG_MAIN())
+            .stroke(egui::Stroke::new(
+                1.0,
+                if picked { t::ACCENT() } else { t::BORDER() },
+            ))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(12));
+        // The card's own click area sits under its buttons.
+        let inner = ui.scope_builder(
+            egui::UiBuilder::new()
+                .id_salt(("card", c.id))
+                .sense(egui::Sense::click()),
+            |ui| {
+                frame.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        let label = if c.claude {
+                            kit::state_label(c.st)
+                        } else {
+                            "Shell"
+                        };
+                        kit::state_pill(ui, label, theme::state_color(c.st));
+                        let g = kit::elide(
+                            ui,
+                            &c.name,
+                            FontId::proportional(13.0),
+                            t::TEXT(),
+                            ui.available_width() - 4.0,
+                        );
+                        ui.label(g);
+                    });
+                    ui.add_space(2.0);
+                    let mut sub = vec![c.folder.clone()];
+                    if let Some(b) = &c.branch {
+                        sub.push(b.clone());
+                    }
+                    let g = kit::elide(
+                        ui,
+                        &sub.join(" · "),
+                        FontId::proportional(11.5),
+                        t::TEXT_3(),
+                        ui.available_width(),
+                    );
+                    ui.label(g);
+                    // The latest activity, live.
+                    let latest = c
+                        .steps
+                        .iter()
+                        .rev()
+                        .find(|s| !matches!(s.kind, StepKind::ThinkingHidden))
+                        .map(|s| s.text.lines().next().unwrap_or("").to_string())
+                        .or_else(|| c.detail.clone());
+                    if let Some(l) = latest.filter(|l| !l.trim().is_empty()) {
+                        ui.add_space(6.0);
+                        let g = kit::elide(
+                            ui,
+                            l.trim(),
+                            FontId::monospace(11.0),
+                            t::TEXT_2(),
+                            ui.available_width(),
+                        );
+                        ui.label(g);
+                    }
+                    if let Some(p) = &prompt {
+                        ui.add_space(8.0);
+                        if let Some(req) = p.request.last() {
+                            let g = kit::elide(
+                                ui,
+                                req,
+                                FontId::monospace(11.5),
+                                t::TEXT_1(),
+                                ui.available_width(),
+                            );
+                            ui.label(g);
+                            ui.add_space(4.0);
+                        }
+                        ui.horizontal(|ui| {
+                            if let Some(n) = p.approve_option()
+                                && kit::primary_button(
+                                    ui,
+                                    Some(Icon::Check),
+                                    "Approve",
+                                    None,
+                                    false,
+                                )
+                                .clicked()
+                            {
+                                *answer = Some((c.id, n));
+                            }
+                            if let Some(n) = p.deny_option()
+                                && kit::secondary_button(ui, None, "Deny").clicked()
+                            {
+                                *answer = Some((c.id, n));
+                            }
+                        });
+                    }
+                    if let Some(cost) = c.cost.filter(|x| *x > 0.0) {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!("${cost:.2}"))
+                                .size(11.0)
+                                .color(t::TEXT_3()),
+                        );
+                    }
+                })
+            },
+        );
+        let resp = inner
+            .response
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.double_clicked() {
+            *open = Some(c.id);
+        } else if resp.clicked() {
+            self.board_pick = if picked { None } else { Some(c.id) };
+        }
+    }
+
+    fn board_list(&mut self, ui: &mut egui::Ui, cards: &[CardInfo], open: &mut Option<PaneId>) {
+        use theme::tokens as t;
+        let area = ui
+            .available_rect_before_wrap()
+            .shrink2(egui::vec2(20.0, 0.0));
+        let mut lu = ui.new_child(egui::UiBuilder::new().max_rect(area).id_salt("board-list"));
+        let cols: [(&str, f32); 6] = [
+            ("", 0.13),
+            ("Session", 0.27),
+            ("Folder", 0.22),
+            ("Branch", 0.16),
+            ("Model", 0.12),
+            ("Cost", 0.10),
+        ];
+        let w = area.width();
+        let row = |ui: &mut egui::Ui,
+                   cells: [(String, egui::Color32); 6],
+                   first: Option<SessionState>,
+                   selected: bool| {
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 36.0), egui::Sense::click());
+            if selected {
+                ui.painter().rect_filled(r, 4.0, t::ACTIVE());
+            } else if first.is_some() && resp.hovered() {
+                ui.painter().rect_filled(r, 4.0, t::HOVER());
+            }
+            let mut x = r.min.x + 10.0;
+            for (i, ((text, color), (_, frac))) in cells.into_iter().zip(cols).enumerate() {
+                let cw = w * frac - 10.0;
+                if i == 0
+                    && let Some(st) = first
+                {
+                    ui.painter().circle_filled(
+                        egui::pos2(x + 4.0, r.center().y),
+                        3.5,
+                        theme::state_color(st),
+                    );
+                    let g = kit::elide(ui, &text, FontId::proportional(12.0), color, cw - 14.0);
+                    ui.painter().galley(
+                        egui::pos2(x + 14.0, r.center().y - g.size().y / 2.0),
+                        g,
+                        color,
+                    );
+                } else {
+                    let g = kit::elide(ui, &text, FontId::proportional(12.0), color, cw);
+                    ui.painter()
+                        .galley(egui::pos2(x, r.center().y - g.size().y / 2.0), g, color);
+                }
+                x += w * frac;
+            }
+            ui.painter().line_segment(
+                [r.left_bottom(), r.right_bottom()],
+                egui::Stroke::new(1.0, t::BORDER()),
+            );
+            (r, resp)
+        };
+        let head = cols.map(|(h, _)| (h.to_string(), t::TEXT_3()));
+        row(&mut lu, head, None, false);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(&mut lu, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for c in cards {
+                    let label = if c.claude {
+                        kit::state_label(c.st)
+                    } else {
+                        "Shell"
+                    };
+                    let (_, resp) = row(
+                        ui,
+                        [
+                            (label.to_string(), t::TEXT_2()),
+                            (c.name.clone(), t::TEXT()),
+                            (c.folder.clone(), t::TEXT_2()),
+                            (c.branch.clone().unwrap_or_default(), t::TEXT_2()),
+                            (c.model.clone().unwrap_or_default(), t::TEXT_2()),
+                            (
+                                c.cost.map(|x| format!("${x:.2}")).unwrap_or_default(),
+                                t::TEXT_2(),
+                            ),
+                        ],
+                        Some(c.st),
+                        self.board_pick == Some(c.id),
+                    );
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if resp.double_clicked() {
+                        *open = Some(c.id);
+                    } else if resp.clicked() {
+                        self.board_pick = Some(c.id);
+                    }
+                }
+            });
+    }
+
+    fn board_details(
+        &mut self,
+        ui: &mut egui::Ui,
+        c: &CardInfo,
+        open: &mut Option<PaneId>,
+        answer: &mut Option<(PaneId, u8)>,
+    ) {
+        use theme::tokens as t;
+        ui.horizontal(|ui| {
+            let label = if c.claude {
+                kit::state_label(c.st)
+            } else {
+                "Shell"
+            };
+            kit::state_pill(ui, label, theme::state_color(c.st));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if kit::icon_button(ui, Icon::Close, "Close details", false).clicked() {
+                    self.board_pick = None;
+                }
+            });
+        });
+        ui.add_space(6.0);
+        ui.label(RichText::new(&c.name).size(16.0).strong().color(t::TEXT()));
         ui.add_space(8.0);
-        let ids = self.ordered_panes();
+        let mut facts = vec![("Folder", c.folder.clone())];
+        if let Some(b) = &c.branch {
+            facts.push(("Branch", b.clone()));
+        }
+        if let Some(m) = &c.model {
+            facts.push(("Model", m.clone()));
+        }
+        if let Some(a) = &c.account {
+            facts.push(("Account", a.clone()));
+        }
+        if let Some(x) = c.cost {
+            facts.push(("Cost", format!("${x:.2}")));
+        }
+        facts.push(("Running for", fmt_elapsed(c.started.elapsed())));
+        for (k, v) in facts {
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(84.0, 18.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_width(84.0);
+                        ui.label(RichText::new(k).size(12.0).color(t::TEXT_3()));
+                    },
+                );
+                let g = kit::elide(
+                    ui,
+                    &v,
+                    FontId::proportional(12.0),
+                    t::TEXT_1(),
+                    ui.available_width(),
+                );
+                ui.label(g);
+            });
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if kit::primary_button(ui, Some(Icon::Terminal), "Open session", None, false).clicked()
+            {
+                *open = Some(c.id);
+            }
+        });
+        if c.st == SessionState::WaitingPermission {
+            ui.add_space(12.0);
+            let prompt = self.permission_prompt(c.id);
+            egui::Frame::new()
+                .fill(theme::AMBER().gamma_multiply(0.08))
+                .stroke(egui::Stroke::new(1.0, theme::AMBER().gamma_multiply(0.5)))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if let Some(n) = permission_buttons(ui, prompt.as_ref(), c.detail.as_deref()) {
+                        *answer = Some((c.id, n));
+                    }
+                });
+        }
+        ui.add_space(14.0);
+        ui.label(
+            RichText::new("Activity")
+                .size(12.0)
+                .strong()
+                .color(t::TEXT_2()),
+        );
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .id_salt("details-activity")
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if c.steps.is_empty() {
+                    ui.label(
+                        RichText::new(if c.claude {
+                            "Nothing yet"
+                        } else {
+                            "Shell sessions show their output in the Sessions view"
+                        })
+                        .size(12.0)
+                        .color(t::TEXT_3()),
+                    );
+                }
+                for s in &c.steps {
+                    let (icon, color) = match s.kind {
+                        StepKind::Prompt => (Icon::Quote, t::TEXT()),
+                        StepKind::Reply => (Icon::Sparkle, t::TEXT_1()),
+                        StepKind::Tool => (Icon::Terminal, t::TEXT_2()),
+                        StepKind::Thinking | StepKind::ThinkingHidden => continue,
+                    };
+                    ui.horizontal_top(|ui| {
+                        let (r, _) =
+                            ui.allocate_exact_size(egui::vec2(14.0, 16.0), egui::Sense::hover());
+                        kit::paint_icon(ui, r, icon, t::TEXT_3());
+                        let text: String = s.text.trim().chars().take(400).collect();
+                        ui.add(
+                            egui::Label::new(RichText::new(text).size(12.0).color(color)).wrap(),
+                        );
+                    });
+                    ui.add_space(6.0);
+                }
+            });
+    }
+
+    /// Live terminal previews of every session.
+    fn session_previews(&mut self, ui: &mut egui::Ui, ids: &[PaneId], open: &mut Option<PaneId>) {
         let cols = ((ids.len() as f32).sqrt().ceil() as usize).clamp(1, 4);
         let gap = 12.0;
         let w = ((ui.available_width() - 32.0 - gap * (cols as f32 - 1.0)) / cols as f32)
@@ -3805,11 +4700,89 @@ impl App {
             }
         });
         if let Some(id) = focus {
-            self.open_session(id);
+            *open = Some(id);
+        }
+    }
+
+    /// After a crash: offer to open a prefilled GitHub issue (opt-in).
+    fn crash_sheet(&mut self, ctx: &egui::Context) {
+        use theme::tokens as t;
+        let Some(path) = self.crashes.last().cloned() else {
+            return;
+        };
+        let report = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut choice = None;
+        let mut dont_ask = false;
+        egui::Modal::new(egui::Id::new("crash-sheet"))
+            .frame(kit::floating_frame().inner_margin(egui::Margin::same(22)))
+            .show(ctx, |ui| {
+                ui.set_width(560.0);
+                ui.label(
+                    RichText::new("Promptly quit unexpectedly last time")
+                        .size(16.0)
+                        .strong()
+                        .color(t::TEXT()),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "You can report it as a GitHub issue. You'll see the issue before \
+                         anything is posted; nothing is sent from here.",
+                    )
+                    .size(12.5)
+                    .color(t::TEXT_2()),
+                );
+                ui.add_space(10.0);
+                egui::Frame::new()
+                    .fill(t::BG_MAIN())
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(220.0)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(
+                                    RichText::new(&report)
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(t::TEXT_2()),
+                                );
+                            });
+                    });
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut dont_ask, "Don't ask again");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if kit::primary_button(ui, None, "Report on GitHub…", None, false).clicked()
+                        {
+                            choice = Some(true);
+                        }
+                        if kit::secondary_button(ui, None, "Not now").clicked() {
+                            choice = Some(false);
+                        }
+                    });
+                });
+            });
+        let Some(report_it) = choice else {
+            return;
+        };
+        if report_it {
+            open_external(&promptly_core::crash::issue_url(
+                promptly_core::update::REPO,
+                &report,
+            ));
+        }
+        // One sheet per launch: older reports are dismissed with it.
+        promptly_core::crash::dismiss(&std::mem::take(&mut self.crashes));
+        if dont_ask {
+            self.crash_ask_off = true;
+            self.save_prefs();
         }
     }
 
     fn overlays(&mut self, ctx: &egui::Context) {
+        self.crash_sheet(ctx);
         // Command palette
         if let Some(p) = self.palette.as_mut() {
             let mut run = None;
@@ -4257,13 +5230,15 @@ impl App {
             self.capturing = None; // closing Settings cancels a rebind
             return;
         }
-        const SECTIONS: [(Icon, &str); 7] = [
+        const SECTIONS: [(Icon, &str); 9] = [
             (Icon::Sparkle, "Claude"),
             (Icon::Users, "Accounts"),
             (Icon::Eye, "Appearance"),
             (Icon::Clock, "Notifications"),
             (Icon::Refresh, "Updates"),
             (Icon::Search, "Shortcuts"),
+            (Icon::Terminal, "Claude Code"),
+            (Icon::Quote, "Prompts"),
             (Icon::Sliders, "Advanced"),
         ];
         let tab_id = egui::Id::new("settings-tab");
@@ -4281,6 +5256,10 @@ impl App {
                 self.terminal_font.clone(),
                 self.ligatures,
                 self.theme_name.clone(),
+            ),
+            (
+                self.session_budget.map(f64::to_bits),
+                self.daily_budget.map(f64::to_bits),
             ),
         );
         let modal = egui::Modal::new(egui::Id::new("settings"))
@@ -4385,9 +5364,17 @@ impl App {
                     self.ligatures,
                     self.theme_name.clone(),
                 ),
+                (
+                    self.session_budget.map(f64::to_bits),
+                    self.daily_budget.map(f64::to_bits),
+                ),
             )
         {
             self.save_prefs();
+            self.core.lock().budgets = crate::session::Budgets {
+                session: self.session_budget,
+                daily: self.daily_budget,
+            };
         }
         for a in actions {
             self.run(a);
@@ -4447,6 +5434,9 @@ impl App {
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                // URL gets the extra room; the other three share the rest.
+                let unit =
+                    ((ui.available_width() - 3.0 * ui.spacing().item_spacing.x) / 5.0).floor();
                 for (i, hint) in [
                     "Name",
                     "URL (http://host:port)",
@@ -4459,7 +5449,7 @@ impl App {
                     ui.add(
                         egui::TextEdit::singleline(&mut form[i])
                             .hint_text(*hint)
-                            .desired_width(if i == 1 { 190.0 } else { 110.0 }),
+                            .desired_width(if i == 1 { unit * 2.0 } else { unit } - 8.0),
                     );
                 }
             });
@@ -4774,6 +5764,7 @@ impl App {
             2 => {
                 // Theme cards, three per row.
                 let mut picked = None;
+                let mut removed: Option<String> = None;
                 kit::settings_group(ui, Some("Theme"), |ui| {
                     ui.add_space(12.0);
                     let themes = theme::all();
@@ -4785,15 +5776,53 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = gap;
                             for p in row {
-                                if theme_card(ui, p, w, p.name == self.theme_name).clicked() {
+                                let card = theme_card(ui, p, w, p.name == self.theme_name);
+                                if card.clicked() {
                                     picked = Some(p.name.to_string());
+                                }
+                                if p.custom {
+                                    card.context_menu(|ui| {
+                                        if ui.button("Remove theme").clicked() {
+                                            removed = Some(p.name.to_string());
+                                            ui.close();
+                                        }
+                                    });
                                 }
                             }
                         });
                         ui.add_space(gap);
                     }
-                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        if kit::secondary_button(ui, Some(Icon::Plus), "Import VS Code theme…")
+                            .on_hover_text("A color theme .json from a VS Code / Cursor extension")
+                            .clicked()
+                            && let Some(f) = rfd::FileDialog::new()
+                                .add_filter("VS Code theme", &["json", "jsonc"])
+                                .set_title("Import a VS Code theme")
+                                .pick_file()
+                        {
+                            match theme::import(&f) {
+                                Ok(name) => {
+                                    self.toast(format!("Imported {name}"));
+                                    picked = Some(name);
+                                }
+                                Err(e) => self.toast(format!("Couldn't import: {e}")),
+                            }
+                        }
+                        ui.label(
+                            RichText::new("Right-click an imported theme to remove it.")
+                                .size(11.5)
+                                .color(t::TEXT_3()),
+                        );
+                    });
+                    ui.add_space(10.0);
                 });
+                if let Some(name) = removed {
+                    theme::remove(&name);
+                    if self.theme_name == name {
+                        picked = Some(theme::DEFAULT.to_string());
+                    }
+                }
                 if let Some(name) = picked
                     && name != self.theme_name
                 {
@@ -4945,6 +5974,54 @@ impl App {
                 }
             }
             3 => {
+                let budget_row = |ui: &mut egui::Ui,
+                                  first: bool,
+                                  label: &str,
+                                  detail: &str,
+                                  v: &mut Option<f64>,
+                                  default: f64| {
+                    kit::setting_row(ui, first, label, detail, |ui| {
+                        let mut on = v.is_some();
+                        if kit::toggle_switch(ui, &mut on).changed() {
+                            *v = on.then_some(default);
+                        }
+                        if let Some(x) = v.as_mut() {
+                            ui.add_space(8.0);
+                            ui.add(
+                                egui::DragValue::new(x)
+                                    .range(0.5..=10_000.0)
+                                    .speed(0.5)
+                                    .prefix("$")
+                                    .fixed_decimals(2),
+                            );
+                        }
+                    });
+                };
+                kit::settings_group(ui, Some("Budgets"), |ui| {
+                    budget_row(
+                        ui,
+                        true,
+                        "Per-session budget",
+                        "Notify when one session's cost passes this.",
+                        &mut self.session_budget,
+                        5.0,
+                    );
+                    budget_row(
+                        ui,
+                        false,
+                        "Daily budget",
+                        "Notify at 80% and 100% of today's spend across sessions.",
+                        &mut self.daily_budget,
+                        20.0,
+                    );
+                });
+                let spent = self.core.lock().spend.total;
+                ui.label(
+                    RichText::new(format!("Spent today: ${spent:.2}"))
+                        .size(12.0)
+                        .color(t::TEXT_3()),
+                );
+                ui.add_space(12.0);
                 let mut c = self.core.lock();
                 kit::settings_group(ui, None, |ui| {
                     kit::setting_row(
@@ -5041,6 +6118,8 @@ impl App {
                 }
             }
             5 => self.shortcuts_section(ui),
+            6 => self.claude_code_section(ui),
+            7 => self.prompts_section(ui),
             _ => {
                 let path = Config::path().to_string_lossy().to_string();
                 kit::settings_group(ui, Some("Configuration"), |ui| {
@@ -5059,6 +6138,19 @@ impl App {
                     kit::setting_row(
                         ui,
                         true,
+                        "Offer to report crashes",
+                        "After a crash, ask whether to open a GitHub issue with the details. Nothing is sent on its own.",
+                        |ui| {
+                            let mut on = !self.crash_ask_off;
+                            if kit::toggle_switch(ui, &mut on).changed() {
+                                self.crash_ask_off = !on;
+                                self.save_prefs();
+                            }
+                        },
+                    );
+                    kit::setting_row(
+                        ui,
+                        false,
                         "Hook event log",
                         "Every hook event Promptly received.",
                         |ui| {
@@ -5427,6 +6519,14 @@ impl eframe::App for App {
                         self.composer.local_model = m
                             .and_then(|m| c.account(&m.account))
                             .and_then(|a| a.local.as_ref().map(|l| l.model.clone()));
+                        let project = m.map(|m| {
+                            promptly_core::git::repo_root(&m.cwd).unwrap_or_else(|| m.cwd.clone())
+                        });
+                        self.composer.prompts =
+                            promptly_core::prompts::for_project(&self.prompts, project.as_deref())
+                                .into_iter()
+                                .cloned()
+                                .collect();
                     }
                     self.composer.known_commands = self.known_commands.lock().clone();
                     self.ask_card(ui);
@@ -5788,8 +6888,61 @@ impl App {
             .data_mut(|d| d.insert_temp(egui::Id::new("settings-tab"), tab));
     }
 
+    pub fn demo_budgets(&mut self, session: Option<f64>, daily: Option<f64>, spent: f64) {
+        self.session_budget = session;
+        self.daily_budget = daily;
+        let mut c = self.core.lock();
+        c.budgets = crate::session::Budgets { session, daily };
+        c.spend.total = spent;
+    }
+
+    pub fn demo_add_prompt(&mut self, name: &str, body: &str) {
+        self.prompts.push(promptly_core::prompts::SavedPrompt {
+            name: name.into(),
+            body: body.into(),
+            project: None,
+        });
+        let _ = promptly_core::prompts::save(&self.prompts);
+    }
+
+    /// Pick a saved prompt from the input's + menu.
+    pub fn demo_use_prompt(&mut self, i: usize) {
+        self.settings_open = false;
+        let p = self.prompts[i].clone();
+        self.composer.use_prompt(p);
+    }
+
+    pub fn demo_composer_text(&self) -> String {
+        self.composer.text.clone()
+    }
+
+    pub fn demo_export(&self, id: PaneId) -> Result<PathBuf, String> {
+        self.export_session(id)
+    }
+
+    pub fn demo_board(&mut self, view: &str, pick: Option<PaneId>) {
+        self.settings_open = false;
+        self.review_open = false;
+        self.grid_mode = true;
+        self.board_view = match view {
+            "list" => BoardView::List,
+            "sessions" => BoardView::Sessions,
+            _ => BoardView::Board,
+        };
+        self.board_pick = pick;
+    }
+
+    pub fn demo_lane(&self, id: PaneId) -> Option<&'static str> {
+        self.card_info(id).map(|c| match c.lane {
+            Lane::NeedsYou => "needs-you",
+            Lane::Working => "working",
+            Lane::Done => "done",
+        })
+    }
+
     pub fn demo_close_overlays(&mut self) {
         self.settings_open = false;
+        self.grid_mode = false;
         self.review_open = false;
         self.review_full = false;
     }
@@ -5994,6 +7147,11 @@ struct Prefs {
     ligatures: bool,
     theme: String,
     keybindings: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    session_budget: Option<f64>,
+    #[serde(default)]
+    daily_budget: Option<f64>,
+    crash_ask_off: bool,
 }
 
 impl Default for Prefs {
@@ -6012,6 +7170,9 @@ impl Default for Prefs {
             ligatures: true,
             theme: theme::DEFAULT.into(),
             keybindings: Default::default(),
+            session_budget: None,
+            daily_budget: None,
+            crash_ask_off: false,
         }
     }
 }
@@ -6226,6 +7387,50 @@ fn permission_buttons(
     picked
 }
 
+/// How the overview shows sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum BoardView {
+    #[default]
+    Board,
+    List,
+    Sessions,
+}
+
+/// Board columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    NeedsYou,
+    Working,
+    Done,
+}
+
+/// What the board shows about a session.
+struct CardInfo {
+    id: PaneId,
+    name: String,
+    st: SessionState,
+    claude: bool,
+    lane: Lane,
+    detail: Option<String>,
+    branch: Option<String>,
+    folder: String,
+    model: Option<String>,
+    cost: Option<f64>,
+    account: Option<String>,
+    steps: Vec<promptly_core::transcript::Step>,
+    started: Instant,
+}
+
+/// "2h 5m", "3m", "40s".
+fn fmt_elapsed(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        _ => format!("{}h {}m", s / 3600, s / 60 % 60),
+    }
+}
+
 /// A result a background thread fills in.
 type Pending<T> = Arc<Mutex<Option<Result<T, String>>>>;
 
@@ -6237,6 +7442,19 @@ struct CommitSheet {
     writing: Option<Pending<String>>,
     /// Commit and then push.
     push: bool,
+}
+
+/// Show a file in Finder (or its folder on Linux).
+fn reveal_in_finder(path: &Path) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+    #[cfg(not(target_os = "macos"))]
+    if let Some(dir) = path.parent() {
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
 }
 
 /// Settings-row control: a switch bound to `on`; yields whether it changed.

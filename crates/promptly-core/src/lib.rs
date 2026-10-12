@@ -3,8 +3,11 @@
 
 pub mod accounts;
 pub mod attention;
+pub mod claude_settings;
 pub mod commands;
 pub mod config;
+pub mod crash;
+pub mod export;
 pub mod git;
 pub mod hooks;
 pub mod index;
@@ -13,6 +16,7 @@ pub mod local_models;
 pub mod nl_command;
 pub mod paths;
 pub mod permission;
+pub mod prompts;
 pub mod sanitize;
 pub mod session_changes;
 pub mod state;
@@ -21,6 +25,7 @@ pub mod transcript;
 pub mod update;
 pub mod usage;
 pub mod util;
+pub mod vscode_theme;
 
 /// Environment variables Promptly sets inside every pane.
 pub mod env {

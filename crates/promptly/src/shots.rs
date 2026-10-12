@@ -515,6 +515,260 @@ fn themes_and_commits() {
     h.state_mut().demo_theme("Promptly");
 }
 
+/// Budgets, the Claude Code settings page, saved prompts and theme import.
+#[test]
+#[ignore]
+fn settings_pages() {
+    use std::time::{Duration, Instant};
+    let dir = std::path::PathBuf::from(
+        std::env::var("PROMPTLY_SHOTS").unwrap_or_else(|_| "/tmp/promptly-shots".into()),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    // A stand-in home with a Claude config, so nothing real is read.
+    let home = tmp.path().join("home");
+    let claude = home.join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    let settings = r#"{
+  "model": "opus",
+  "permissions": {
+    "allow": ["Bash(npm test:*)", "Bash(git status)", "Read"],
+    "deny": ["Bash(rm -rf:*)"],
+    "defaultMode": "acceptEdits"
+  }
+}
+"#;
+    std::fs::write(claude.join("settings.json"), settings).unwrap();
+    std::fs::write(
+        home.join(".claude.json"),
+        r#"{"mcpServers":{"linear":{"url":"https://mcp.linear.app/sse"},"filesystem":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(claude.join("commands")).unwrap();
+    std::fs::write(
+        claude.join("commands/release-notes.md"),
+        "---\ndescription: Draft release notes from merged PRs\n---\nDraft notes.",
+    )
+    .unwrap();
+    let theme_file = tmp.path().join("ayu-mirage.json");
+    std::fs::write(
+        &theme_file,
+        r##"{
+  // From an Ayu extension
+  "name": "Ayu Mirage",
+  "type": "dark",
+  "colors": {
+    "editor.background": "#1f2430",
+    "editor.foreground": "#cccac2",
+    "sideBar.background": "#1c212b",
+    "button.background": "#ffcc66",
+    "editor.selectionBackground": "#409fff40",
+    "terminal.ansiGreen": "#87d96c",
+  },
+}"##,
+    )
+    .unwrap();
+    // SAFETY: test-only setup before any app threads start.
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::set_var("PROMPTLY_DATA_DIR", tmp.path().join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
+        for k in [
+            "PROMPTLY_CONTROL",
+            "PROMPTLY_SOCKET",
+            "PROMPTLY_TOKEN",
+            "PROMPTLY_SESSION",
+            "CLAUDE_CONFIG_DIR",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+    // A crash from a "previous run".
+    let crashes = tmp.path().join("data/crashes");
+    promptly_core::crash::save_in(
+        &crashes,
+        &promptly_core::crash::report(
+            "called `Option::unwrap()` on a `None` value",
+            Some("crates/promptly/src/review.rs:812:41"),
+            "   0: promptly::review::ReviewState::ui\n   1: promptly::app::App::review_ui",
+            "2026.10.0",
+        ),
+    )
+    .unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_eframe(|cc| App::new(cc));
+    h.ctx.set_os(egui::os::OperatingSystem::Mac);
+    let pump = |h: &mut Harness<'_, App>, secs: f32| {
+        let t0 = Instant::now();
+        while t0.elapsed().as_secs_f32() < secs {
+            h.step();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let shot = |h: &mut Harness<'_, App>, name: &str| {
+        pump(h, 1.0);
+        h.render()
+            .expect("render")
+            .save(dir.join(format!("{name}.png")))
+            .unwrap();
+        println!("wrote {name}.png");
+    };
+    let _ = h
+        .state_mut()
+        .demo_shell(tmp.path().to_str().unwrap())
+        .unwrap();
+    pump(&mut h, 1.0);
+    shot(&mut h, "crash-sheet");
+    {
+        use egui_kittest::kittest::Queryable;
+        h.get_by_label("Not now").click();
+    }
+    pump(&mut h, 0.5);
+    assert!(
+        promptly_core::crash::pending_in(&crashes).is_empty(),
+        "dismissed"
+    );
+
+    // Budgets.
+    h.state_mut().demo_budgets(Some(5.0), Some(20.0), 17.4);
+    h.state_mut().demo_settings_tab(3);
+    shot(&mut h, "settings-budgets");
+
+    // Claude Code: rules, MCP servers, commands.
+    h.state_mut().demo_settings_tab(6);
+    shot(&mut h, "settings-claude-code");
+
+    // Theme import, then it's in the picker and applied.
+    let name = crate::theme::import(&theme_file).unwrap();
+    assert_eq!(name, "Ayu Mirage");
+    assert!(
+        crate::theme::all()
+            .iter()
+            .any(|p| p.name == "Ayu Mirage" && p.custom)
+    );
+    h.state_mut().demo_theme("Ayu Mirage");
+    h.state_mut().demo_settings_tab(2);
+    shot(&mut h, "settings-theme-imported");
+    h.state_mut().demo_theme("Promptly");
+
+    // Saved prompts: listed in Settings, then filled from the input.
+    h.state_mut().demo_add_prompt(
+        "Security review",
+        "Review {{file}} for {{concern}} and suggest fixes.",
+    );
+    h.state_mut()
+        .demo_add_prompt("Write tests", "Add tests for the last change.");
+    assert_eq!(promptly_core::prompts::load().len(), 2, "saved to disk");
+    h.state_mut().demo_settings_tab(7);
+    shot(&mut h, "settings-prompts");
+    h.state_mut().demo_use_prompt(1);
+    pump(&mut h, 0.3);
+    assert_eq!(
+        h.state().demo_composer_text(),
+        "Add tests for the last change."
+    );
+    h.state_mut().demo_use_prompt(0);
+    shot(&mut h, "prompt-variables");
+    h.key_press(egui::Key::Enter);
+    pump(&mut h, 0.3);
+    assert_eq!(
+        h.state().demo_composer_text(),
+        "Add tests for the last change.\nReview  for  and suggest fixes."
+    );
+}
+
+/// Every main surface in GitHub Light, for the light-theme pass.
+#[test]
+#[ignore]
+fn light_theme_pages() {
+    use std::time::{Duration, Instant};
+    let dir = std::path::PathBuf::from(
+        std::env::var("PROMPTLY_SHOTS").unwrap_or_else(|_| "/tmp/promptly-shots".into()),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    // SAFETY: test-only setup before any app threads start.
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+        std::env::set_var("PROMPTLY_DATA_DIR", tmp.path().join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
+        for k in [
+            "PROMPTLY_CONTROL",
+            "PROMPTLY_SOCKET",
+            "PROMPTLY_TOKEN",
+            "PROMPTLY_SESSION",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_eframe(|cc| App::new(cc));
+    h.ctx.set_os(egui::os::OperatingSystem::Mac);
+    let pump = |h: &mut Harness<'_, App>, secs: f32| {
+        let t0 = Instant::now();
+        while t0.elapsed().as_secs_f32() < secs {
+            h.step();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let shot = |h: &mut Harness<'_, App>, name: &str| {
+        pump(h, 0.8);
+        h.render()
+            .expect("render")
+            .save(dir.join(format!("light-{name}.png")))
+            .unwrap();
+        println!("wrote light-{name}.png");
+    };
+    let id = h
+        .state_mut()
+        .demo_shell(tmp.path().to_str().unwrap())
+        .unwrap();
+    pump(&mut h, 1.0);
+    h.state_mut().demo_theme("GitHub Light");
+    h.state_mut()
+        .demo_add_prompt("Security review", "Review {{file}} for {{concern}}.");
+    h.state_mut().demo_budgets(Some(5.0), Some(20.0), 3.2);
+    shot(&mut h, "main");
+    h.state_mut().demo_board("board", Some(id));
+    shot(&mut h, "board");
+    h.state_mut().demo_board("list", None);
+    shot(&mut h, "list");
+    h.state_mut().demo_close_overlays();
+    h.state_mut().demo_view(false, true, false);
+    shot(&mut h, "usage");
+    h.state_mut().demo_view(false, false, true);
+    shot(&mut h, "palette");
+    h.state_mut().demo_view(false, false, false);
+    for (i, name) in [
+        "claude",
+        "accounts",
+        "appearance",
+        "notifications",
+        "updates",
+        "shortcuts",
+        "claude-code",
+        "prompts",
+        "advanced",
+    ]
+    .iter()
+    .enumerate()
+    {
+        h.state_mut().demo_settings_tab(i);
+        shot(&mut h, &format!("settings-{name}"));
+    }
+    h.state_mut().demo_use_prompt(0);
+    shot(&mut h, "prompt-sheet");
+    h.state_mut().demo_theme("Promptly");
+}
+
 /// A fresh folder for real-Claude tests (never an existing project).
 fn fresh_dir(tag: &str) -> std::path::PathBuf {
     let base = std::env::var("PROMPTLY_TEST_ROOT").expect("PROMPTLY_TEST_ROOT: a scratch folder");
@@ -564,6 +818,129 @@ fn start_claude(h: &mut Harness<'_, App>, dir: &std::path::Path) -> crate::pty::
             return id;
         }
     }
+}
+
+/// The board: sessions in Needs you / Working / Done, approve from a card,
+/// the details panel, the list, and Markdown export.
+///   PROMPTLY_TEST_ROOT=<scratch> cargo test -p promptly board_e2e -- --ignored --nocapture
+#[test]
+#[ignore]
+fn board_e2e() {
+    use std::time::{Duration, Instant};
+    let shots = std::path::PathBuf::from(
+        std::env::var("PROMPTLY_SHOTS").unwrap_or_else(|_| "/tmp/promptly-shots".into()),
+    );
+    std::fs::create_dir_all(&shots).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    // SAFETY: test-only setup before any app threads start.
+    unsafe {
+        std::env::set_var("PROMPTLY_DATA_DIR", tmp.path().join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
+        for k in [
+            "PROMPTLY_CONTROL",
+            "PROMPTLY_SOCKET",
+            "PROMPTLY_TOKEN",
+            "PROMPTLY_SESSION",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_eframe(|cc| App::new(cc));
+    h.ctx.set_os(egui::os::OperatingSystem::Mac);
+    let pump = |h: &mut Harness<'_, App>, secs: f32| {
+        let t0 = Instant::now();
+        while t0.elapsed().as_secs_f32() < secs {
+            h.step();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let wait = |h: &mut Harness<'_, App>, what: &str, f: &dyn Fn(&App) -> bool| {
+        let t0 = Instant::now();
+        while !f(h.state()) {
+            pump(h, 0.5);
+            assert!(t0.elapsed() < Duration::from_secs(150), "timed out: {what}");
+        }
+    };
+    h.state_mut()
+        .demo_claude_args(&["--permission-mode", "default"]);
+    // Finished.
+    let done_dir = fresh_dir("board-done");
+    let done = start_claude(&mut h, &done_dir);
+    h.state_mut()
+        .demo_send(done, "Reply with exactly one word: ready");
+    wait(&mut h, "first session done", &|a| {
+        a.demo_lane(done) == Some("done") && a.demo_settled(done)
+    });
+    // Waiting for approval.
+    let ask_dir = fresh_dir("board-ask");
+    let ask = start_claude(&mut h, &ask_dir);
+    h.state_mut().demo_send(
+        ask,
+        "Run exactly this shell command with the Bash tool and nothing else: touch board-approved.txt",
+    );
+    wait(&mut h, "permission prompt", &|a| {
+        a.demo_permission(ask).is_some()
+    });
+    assert_eq!(h.state().demo_lane(ask), Some("needs-you"));
+    // Working.
+    let work_dir = fresh_dir("board-work");
+    let work = start_claude(&mut h, &work_dir);
+    h.state_mut().demo_send(
+        work,
+        "Without using any tools, write a 700-word short story about a lighthouse keeper.",
+    );
+    wait(&mut h, "working", &|a| a.demo_lane(work) == Some("working"));
+
+    h.state_mut().demo_board("board", None);
+    pump(&mut h, 1.5);
+    h.render().unwrap().save(shots.join("board.png")).unwrap();
+    h.state_mut().demo_board("board", Some(ask));
+    pump(&mut h, 1.0);
+    h.render()
+        .unwrap()
+        .save(shots.join("board-details.png"))
+        .unwrap();
+    h.state_mut().demo_board("list", Some(done));
+    pump(&mut h, 1.0);
+    h.render()
+        .unwrap()
+        .save(shots.join("board-list.png"))
+        .unwrap();
+    h.state_mut().demo_board("sessions", None);
+    pump(&mut h, 1.0);
+    h.render()
+        .unwrap()
+        .save(shots.join("board-sessions.png"))
+        .unwrap();
+
+    // Approve from the card's button.
+    h.state_mut().demo_board("board", None);
+    pump(&mut h, 1.0);
+    {
+        use egui_kittest::kittest::Queryable;
+        h.get_by_label("Approve").click();
+    }
+    pump(&mut h, 0.5);
+    wait(&mut h, "approved file", &|_| {
+        ask_dir.join("board-approved.txt").exists()
+    });
+    wait(&mut h, "approved session leaves Needs you", &|a| {
+        a.demo_lane(ask) != Some("needs-you")
+    });
+    println!("approved from the board");
+
+    // Export the finished session.
+    let path = h.state().demo_export(done).expect("export");
+    let md = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    println!("export {}:\n{md}", path.display());
+    assert!(md.contains("## You\n\nReply with exactly one word: ready"));
+    assert!(md.to_lowercase().contains("## claude\n\nready"));
 }
 
 /// Approve and deny Claude's permission prompts from Promptly's buttons.

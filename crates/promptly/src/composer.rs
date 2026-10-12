@@ -125,6 +125,10 @@ pub struct Composer {
     pub effort: Option<String>,
     /// The session runs on a local model (no Claude model/effort pickers).
     pub local_model: Option<String>,
+    /// Saved prompts offered in the + menu (set by the app each frame).
+    pub prompts: Vec<promptly_core::prompts::SavedPrompt>,
+    /// A saved prompt waiting for its {{variables}}: (prompt, values).
+    filling: Option<(promptly_core::prompts::SavedPrompt, Vec<(String, String)>)>,
     /// Commands, builtins, aliases and functions the user's shell knows.
     pub known_commands: Arc<std::collections::HashSet<String>>,
     /// The user flipped Run/Ask for the current text.
@@ -148,6 +152,75 @@ impl Composer {
             (g, false) => g,
             (Intent::Ask, true) => Intent::Command,
             (Intent::Command, true) => Intent::Ask,
+        }
+    }
+
+    /// Insert a saved prompt, asking for its {{variables}} first.
+    pub fn use_prompt(&mut self, p: promptly_core::prompts::SavedPrompt) {
+        let vars = promptly_core::prompts::variables(&p.body);
+        if vars.is_empty() {
+            self.insert_block(&p.body);
+        } else {
+            let values = vars.into_iter().map(|v| (v, String::new())).collect();
+            self.filling = Some((p, values));
+        }
+    }
+
+    /// Append text on a new line and focus the input.
+    fn insert_block(&mut self, body: &str) {
+        if !self.text.is_empty() && !self.text.ends_with('\n') {
+            self.text.push('\n');
+        }
+        self.text.push_str(body);
+        self.focus_requested = true;
+    }
+
+    /// The sheet that fills a saved prompt's {{variables}}.
+    fn fill_sheet(&mut self, ctx: &egui::Context) {
+        let Some((prompt, mut values)) = self.filling.take() else {
+            return;
+        };
+        let mut done = false;
+        let mut close = false;
+        let m = egui::Modal::new(egui::Id::new("prompt-fill"))
+            .frame(kit::floating_frame().inner_margin(egui::Margin::same(20)))
+            .show(ctx, |ui| {
+                ui.set_width(460.0);
+                ui.label(
+                    RichText::new(&prompt.name)
+                        .size(16.0)
+                        .strong()
+                        .color(t::TEXT()),
+                );
+                ui.add_space(10.0);
+                for (i, (name, value)) in values.iter_mut().enumerate() {
+                    ui.label(RichText::new(name.as_str()).size(12.0).color(t::TEXT_2()));
+                    let r = ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY));
+                    if i == 0 && value.is_empty() && !r.has_focus() {
+                        r.request_focus();
+                    }
+                    ui.add_space(6.0);
+                }
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if kit::primary_button(ui, None, "Insert", Some("↵"), false).clicked()
+                        || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
+                        done = true;
+                    }
+                    if kit::secondary_button(ui, None, "Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if m.should_close() {
+            close = true;
+        }
+        if done {
+            let map = values.into_iter().collect();
+            self.insert_block(&promptly_core::prompts::fill(&prompt.body, &map));
+        } else if !close {
+            self.filling = Some((prompt, values));
         }
     }
 
@@ -445,6 +518,7 @@ impl Composer {
         target: &str,
     ) -> Option<ComposerAction> {
         let mut action = None;
+        self.fill_sheet(ui.ctx());
         let id = edit_id();
         let focused = ui.memory(|m| m.has_focus(id));
         if focused && !self.was_focused {
@@ -651,6 +725,19 @@ impl Composer {
                     if menu_item(ui, Icon::Image, "Paste image from clipboard") {
                         ui.close();
                         self.paste_clipboard_image();
+                    }
+                    if !self.prompts.is_empty() {
+                        ui.separator();
+                        let mut chosen = None;
+                        for p in &self.prompts {
+                            if menu_item(ui, Icon::Sparkle, &p.name) {
+                                chosen = Some(p.clone());
+                                ui.close();
+                            }
+                        }
+                        if let Some(p) = chosen {
+                            self.use_prompt(p);
+                        }
                     }
                     if !snippets.is_empty() {
                         ui.separator();

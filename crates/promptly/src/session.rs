@@ -148,6 +148,95 @@ pub struct LogEntry {
     pub summary: String,
 }
 
+/// Spending caps; `None` means no cap.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Budgets {
+    pub session: Option<f64>,
+    pub daily: Option<f64>,
+}
+
+/// Today's spend across sessions (Claude accounts only).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DailySpend {
+    pub date: String,
+    pub total: f64,
+    /// Highest daily-budget warning sent today: 0, 80 or 100.
+    #[serde(default)]
+    pub warned: u8,
+}
+
+impl DailySpend {
+    fn path() -> PathBuf {
+        promptly_core::paths::data_dir().join("spend.json")
+    }
+
+    fn today() -> String {
+        chrono::Local::now().format("%Y-%m-%d").to_string()
+    }
+
+    pub fn load() -> Self {
+        let s: Self = std::fs::read(Self::path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        if s.date == Self::today() {
+            s
+        } else {
+            Self {
+                date: Self::today(),
+                ..Default::default()
+            }
+        }
+    }
+
+    /// Add `delta` dollars; returns a notification when a daily budget
+    /// threshold (80%, 100%) is crossed for the first time today.
+    pub fn add(&mut self, delta: f64, budget: Option<f64>) -> Option<(String, String)> {
+        let note = self.bump(delta, budget, &Self::today());
+        if let Ok(b) = serde_json::to_vec(self) {
+            let _ = promptly_core::util::write_private(&Self::path(), &b);
+        }
+        note
+    }
+
+    fn bump(&mut self, delta: f64, budget: Option<f64>, today: &str) -> Option<(String, String)> {
+        if self.date != today {
+            *self = Self {
+                date: today.to_string(),
+                ..Default::default()
+            };
+        }
+        self.total += delta;
+        budget.filter(|b| *b > 0.0).and_then(|b| {
+            let pct = self.total / b * 100.0;
+            let level = if pct >= 100.0 {
+                100
+            } else if pct >= 80.0 {
+                80
+            } else {
+                0
+            };
+            (level > self.warned).then(|| {
+                self.warned = level;
+                if level >= 100 {
+                    (
+                        "Daily budget reached".to_string(),
+                        format!(
+                            "Claude sessions have cost ${:.2} today (budget ${b:.2}).",
+                            self.total
+                        ),
+                    )
+                } else {
+                    (
+                        "80% of today's budget".to_string(),
+                        format!("${:.2} of ${b:.2} spent today.", self.total),
+                    )
+                }
+            })
+        })
+    }
+}
+
 pub struct Core {
     pub sessions: BTreeMap<PaneId, SessionMeta>,
     pub attention: AttentionQueue,
@@ -165,6 +254,10 @@ pub struct Core {
     local: Vec<promptly_core::accounts::LocalModel>,
     /// Plan limits reported by Claude Code, per account id.
     pub usage: HashMap<String, AccountUsage>,
+    /// Spending caps from Settings (USD).
+    pub budgets: Budgets,
+    /// What Claude sessions have cost today, kept across restarts.
+    pub spend: DailySpend,
     /// Today's tokens across every Claude session on the machine.
     pub daily: Option<promptly_core::usage::DailyUsage>,
 }
@@ -187,6 +280,8 @@ impl Core {
             accounts_file: AccountsFile::load(),
             local: promptly_core::local_models::discover(),
             usage: HashMap::new(),
+            budgets: Budgets::default(),
+            spend: DailySpend::load(),
             daily: None,
         }
         .with_accounts()
@@ -528,6 +623,31 @@ impl ClaudeLink {
                         if local {
                             info.cost_usd = None;
                         }
+                        // Spend: what this update added, against the budgets.
+                        let budgets = c.budgets;
+                        let mut budget_note = None;
+                        let delta = c.sessions.get(&pane).and_then(|m| {
+                            let new = info.cost_usd?;
+                            // The first report of a resumed session carries
+                            // its earlier cost; count only what's added after.
+                            let old = m.status.cost_usd?;
+                            let name = m.display_name();
+                            if let Some(b) = budgets.session.filter(|b| *b > 0.0)
+                                && old < b
+                                && new >= b
+                            {
+                                budget_note = Some((
+                                    format!("{name} passed its budget"),
+                                    format!("This session has cost ${new:.2} (budget ${b:.2})."),
+                                ));
+                            }
+                            (new > old).then_some(new - old)
+                        });
+                        if let Some(d) = delta
+                            && let Some(n) = c.spend.add(d, budgets.daily)
+                        {
+                            budget_note.get_or_insert(n);
+                        }
                         if let Some(meta) = c.sessions.get_mut(&pane) {
                             if let Some(cost) = info.cost_usd {
                                 meta.cost_series.push(now as f64, cost);
@@ -568,6 +688,7 @@ impl ClaudeLink {
                             }
                             _ => None,
                         }
+                        .or(budget_note)
                     }
                     Incoming::Control(..) => None,
                 }
@@ -683,4 +804,31 @@ fn capitalize(s: &str) -> String {
     c.next()
         .map(|f| f.to_uppercase().chain(c).collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod spend_tests {
+    use super::DailySpend;
+
+    #[test]
+    fn daily_budget_warns_once_per_threshold_and_resets_daily() {
+        let mut s = DailySpend::default();
+        assert_eq!(s.bump(5.0, Some(10.0), "2026-10-12"), None);
+        let n = s.bump(3.5, Some(10.0), "2026-10-12").unwrap();
+        assert_eq!(n.0, "80% of today's budget");
+        assert_eq!(s.bump(0.5, Some(10.0), "2026-10-12"), None, "80% only once");
+        let n = s.bump(1.5, Some(10.0), "2026-10-12").unwrap();
+        assert_eq!(n.0, "Daily budget reached");
+        assert_eq!(
+            s.bump(4.0, Some(10.0), "2026-10-12"),
+            None,
+            "100% only once"
+        );
+        assert!((s.total - 14.5).abs() < 1e-9);
+        // A new day starts from zero.
+        assert_eq!(s.bump(1.0, Some(10.0), "2026-10-13"), None);
+        assert_eq!((s.date.as_str(), s.total, s.warned), ("2026-10-13", 1.0, 0));
+        // No budget, no notes.
+        assert_eq!(s.bump(100.0, None, "2026-10-13"), None);
+    }
 }

@@ -12,7 +12,7 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use egui::Color32;
 use promptly_core::state::SessionState;
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// What a theme defines; everything else is derived the same way for all.
 struct Spec {
@@ -210,6 +210,8 @@ const SPECS: &[Spec] = &[
 /// A full set of colors, derived once from a [`Spec`].
 pub struct Palette {
     pub name: &'static str,
+    /// Imported by the user (can be removed).
+    pub custom: bool,
     pub light: bool,
     pub bg_main: Color32,
     pub bg_sidebar: Color32,
@@ -275,6 +277,7 @@ impl Palette {
         let c = |i: usize| col(s.ansi[i]);
         Self {
             name: s.name,
+            custom: false,
             light: s.light,
             bg_main: bg,
             bg_sidebar: col(s.sidebar),
@@ -323,25 +326,122 @@ impl Palette {
     }
 }
 
-static PALETTES: LazyLock<Vec<Palette>> =
-    LazyLock::new(|| SPECS.iter().map(Palette::from_spec).collect());
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
+/// Built-in themes, then imported ones. Palettes live for the whole run
+/// (imports are few and small), so lookups need no lock.
+static REGISTRY: LazyLock<parking_lot::RwLock<Vec<&'static Palette>>> = LazyLock::new(|| {
+    parking_lot::RwLock::new(
+        SPECS
+            .iter()
+            .map(|s| &*Box::leak(Box::new(Palette::from_spec(s))))
+            .collect(),
+    )
+});
+static CURRENT: AtomicPtr<Palette> = AtomicPtr::new(std::ptr::null_mut());
 
 /// The active palette.
 pub fn current() -> &'static Palette {
-    &PALETTES[CURRENT.load(Ordering::Relaxed).min(PALETTES.len() - 1)]
+    let p = CURRENT.load(Ordering::Relaxed);
+    if p.is_null() {
+        REGISTRY.read()[0]
+    } else {
+        // SAFETY: only ever set to a leaked, never-freed &'static Palette.
+        unsafe { &*p }
+    }
 }
 
 /// Every theme, in menu order.
-pub fn all() -> &'static [Palette] {
-    &PALETTES
+pub fn all() -> Vec<&'static Palette> {
+    REGISTRY.read().clone()
 }
 
 /// Switch themes by name (unknown names fall back to the default). Call
 /// [`apply_chrome`] afterwards so egui's own widgets follow.
 pub fn set(name: &str) {
-    let i = PALETTES.iter().position(|p| p.name == name).unwrap_or(0);
-    CURRENT.store(i, Ordering::Relaxed);
+    let reg = REGISTRY.read();
+    let p = reg
+        .iter()
+        .find(|p| p.name == name)
+        .copied()
+        .unwrap_or(reg[0]);
+    CURRENT.store(p as *const Palette as *mut Palette, Ordering::Relaxed);
+}
+
+/// Imported themes are kept here, one VS Code `.json` per theme.
+fn custom_dir() -> std::path::PathBuf {
+    promptly_core::paths::data_dir().join("themes")
+}
+
+fn register(t: promptly_core::vscode_theme::Imported) -> &'static Palette {
+    let spec = Spec {
+        name: Box::leak(t.name.clone().into_boxed_str()),
+        light: t.light,
+        bg: t.bg,
+        sidebar: t.sidebar,
+        panel: t.panel,
+        border: t.border,
+        text: t.text,
+        muted: t.muted,
+        accent: t.accent,
+        selection: t.selection,
+        fg: t.fg,
+        ansi: t.ansi,
+    };
+    let mut p = Palette::from_spec(&spec);
+    p.custom = true;
+    let p: &'static Palette = Box::leak(Box::new(p));
+    let mut reg = REGISTRY.write();
+    reg.retain(|x| !(x.custom && x.name == p.name));
+    reg.push(p);
+    p
+}
+
+/// Load the themes imported earlier (call at startup, before [`set`]).
+pub fn load_custom() {
+    for e in std::fs::read_dir(custom_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if let Ok(src) = std::fs::read_to_string(e.path())
+            && let Ok(t) = promptly_core::vscode_theme::parse(&src)
+        {
+            register(t);
+        }
+    }
+}
+
+/// Import a VS Code theme file; keeps a copy and returns the theme's name.
+pub fn import(path: &std::path::Path) -> Result<String, String> {
+    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let t = promptly_core::vscode_theme::parse(&src)?;
+    if SPECS.iter().any(|s| s.name == t.name) {
+        return Err(format!("\u{201c}{}\u{201d} is already built in", t.name));
+    }
+    let dir = custom_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(file_for(&t.name)), &src).map_err(|e| e.to_string())?;
+    Ok(register(t).name.to_string())
+}
+
+/// Remove an imported theme (built-in ones can't be removed).
+pub fn remove(name: &str) {
+    let mut reg = REGISTRY.write();
+    reg.retain(|p| !(p.custom && p.name == name));
+    let _ = std::fs::remove_file(custom_dir().join(file_for(name)));
+}
+
+fn file_for(name: &str) -> String {
+    let slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("{slug}.json")
 }
 
 pub const DEFAULT: &str = "Promptly";
@@ -682,6 +782,30 @@ mod tests {
             );
             assert_eq!(p.light, lum(p.term_bg) > 0.5, "{}: light flag", p.name);
         }
+    }
+
+    #[test]
+    fn import_registers_and_removes() {
+        let d = tempfile::tempdir().unwrap();
+        // SAFETY: test-only; nothing else reads PROMPTLY_DATA_DIR here.
+        unsafe { std::env::set_var("PROMPTLY_DATA_DIR", d.path()) };
+        let f = d.path().join("ayu.json");
+        std::fs::write(
+            &f,
+            r##"{"name":"Test Ayu","type":"dark","colors":{"editor.background":"#0b0e14","editor.foreground":"#bfbdb6","button.background":"#e6b450"}}"##,
+        )
+        .unwrap();
+        assert_eq!(import(&f).unwrap(), "Test Ayu");
+        let p = all().into_iter().find(|p| p.name == "Test Ayu").unwrap();
+        assert!(p.custom);
+        assert_eq!(p.accent, Color32::from_rgb(0xe6, 0xb4, 0x50));
+        assert!(
+            d.path().join("themes/test-ayu.json").exists(),
+            "a copy is kept"
+        );
+        remove("Test Ayu");
+        assert!(all().iter().all(|p| p.name != "Test Ayu"));
+        assert!(!d.path().join("themes/test-ayu.json").exists());
     }
 
     #[test]

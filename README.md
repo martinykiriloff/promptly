@@ -54,6 +54,9 @@ Promptly reads that structure for you:
 - **Native notifications** with deduplication, rate limiting, mute per session and
   priority per session. You aren't notified about the session you're looking at.
 - **⌘J** jumps to the next session that needs you.
+- **Approve or deny without the terminal.** Claude's permission choices appear as
+  buttons on the session header and on board cards. Promptly presses only the
+  choice you click.
 - Notifications only ever *take you to* a session. **Promptly never approves anything
   on your behalf.**
 
@@ -78,6 +81,9 @@ into a live view:
     one-hour spend sparkline
 - **Limit alerts:** a notification when the 5-hour or weekly window crosses 80% and
   95%, once per window.
+- **Budgets:** a per-session cap and a daily cap (Settings → Notifications). You're
+  notified when a session passes its cap and at 80% and 100% of the day's spend;
+  the status bar shows `$12.40 / $20 today`.
 - Cost and limits come from Claude Code itself. Promptly doesn't estimate pricing.
 
 ### Many sessions, no collisions
@@ -89,7 +95,10 @@ into a live view:
   remove a worktree that has uncommitted changes, and it always keeps the branch.
 - **Fan out (⇧⌘F).** Paste a task list and get one Claude session per line, each in
   its own worktree, shown in a live grid.
-- **Splits and tabs, plus a session grid (⌘G)** with live previews of every terminal.
+- **Splits and tabs.**
+- **All sessions (⌘G)** as a board (*Needs you*, *Working*, *Done*) with approve
+  buttons on cards and a details panel with live activity, as a list, or as live
+  previews of every terminal.
 
 ### Review without leaving the terminal
 
@@ -100,6 +109,14 @@ into a live view:
   structured prompt.
 - **Open in your `$EDITOR`.** Terminal editors open in a split; GUI editors jump to
   the line.
+- **Scopes:** the branch, uncommitted changes, any single commit, everything this
+  session changed (git repo or not, even while Claude is working), or just the last
+  prompt's changes.
+- **Revert a file or a single block** of changes.
+- **Commit, push and open a pull request** from the review pane, with a commit
+  message Claude writes from the diff.
+- **Export a session as Markdown** (palette → *Export conversation*): the
+  conversation and its changes, saved to Downloads.
 
 ### A better way to write prompts
 
@@ -108,6 +125,8 @@ into a live view:
   - history (⌃↑ / ⌃↓)
   - snippets
   - ⌘↵ to send
+- **Saved prompts** (Settings → Prompts) with `{{variables}}` you fill in when you
+  use them, for every project or just one. Pick them from the composer's **+** menu.
 - Text goes into the session as a bracketed paste, exactly as if you'd typed it.
 - **Shift+Enter works** through the Kitty keyboard protocol.
 
@@ -133,6 +152,21 @@ handle poorly. Costs and plan limits are hidden for local sessions, since they
 don't apply. Interactive Claude Code needs about 30k tokens of context, so pick
 a model with a large context window (for example a coding model with 64k+);
 small models like an 8B work for quick prompts but struggle with real tasks.
+
+LM Studio models are found too, and you can add any Anthropic-compatible server
+(Settings → Accounts → Model servers).
+
+**Claude Code's own settings** for each account are in Settings → Claude Code:
+edit permission rules (allow, ask, deny, with Claude Code's wildcard warning), and
+see MCP servers, commands and skills. Edits keep everything else in
+`settings.json` as it was, and the first edit saves a backup beside it.
+
+### Themes
+
+Ten built-in themes modeled on the most-installed editor themes (GitHub Dark and
+Light, One Dark Pro, Dracula, Tokyo Night, Catppuccin Mocha, Nord, Night Owl,
+Monokai Pro, and Promptly's own). **Import any VS Code or Cursor color theme**
+(`.json`) from Settings → Appearance.
 
 ### Keyboard-first, mouse-friendly
 
@@ -177,6 +211,13 @@ clear the quarantine flag once:
 ```sh
 xattr -dr com.apple.quarantine Promptly.app
 ```
+
+The release workflow signs and notarizes the app as soon as these repository
+secrets exist (and builds unsigned until then): `MACOS_CERT_P12` (base64 of the
+Developer ID Application certificate as `.p12`), `MACOS_CERT_PASSWORD`,
+`MACOS_SIGN_IDENTITY` (e.g. `Developer ID Application: Name (TEAMID)`), and for
+notarization `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` (an
+app-specific password).
 
 ### Updating
 
@@ -368,6 +409,9 @@ Losing any one signal degrades a feature, never the terminal.
   Embedded paste terminators are removed so content can't escape bracketed-paste mode.
 - **Credentials stay with the CLI.** Promptly never reads, stores or proxies API keys
   or logins.
+- **Crash reports are opt-in.** A crash is written to a local file. On the next
+  launch Promptly offers to open a prefilled GitHub issue that you review before
+  posting. Nothing is sent automatically, and you can turn the offer off.
 - **Local only.** No account and no telemetry. The only network request Promptly
   itself makes is the update check to the GitHub Releases API, which you can turn
   off with `[updates] check = false`. "Copy diagnostics" redacts token-looking values.
@@ -404,7 +448,7 @@ Next:
 - [ ] A separate PTY-owner process so sessions survive a UI restart
 - [ ] Clicking a notification on macOS opens the session (needs the signed bundle)
 - [ ] Ligatures (HarfBuzz shaping) and screen-reader access to the terminal grid
-- [ ] Light theme
+- [x] Light theme
 - [ ] Headless background agents via the Claude Agent SDK
 - [ ] Checkpoint timeline: jump to a prior turn and fork
 - [ ] Remote sessions over SSH

@@ -12,12 +12,53 @@ env:
 jobs:
   macos:
     runs-on: macos-14
+    env:
+      # Developer ID signing and notarization run only when these secrets
+      # exist; without them the build is unsigned, as before.
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Signing keychain (Developer ID)
+        if: env.MACOS_CERT_P12 != '' && env.MACOS_SIGN_IDENTITY != ''
+        run: |
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          KC_PASS=$(uuidgen)
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KC" > /dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "APPLE_SIGN_IDENTITY=$MACOS_SIGN_IDENTITY" >> "$GITHUB_ENV"
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+            xcrun notarytool store-credentials promptly --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --keychain "$KC"
+            echo "NOTARY_PROFILE=promptly" >> "$GITHUB_ENV"
+          else
+            echo "::notice::Signing with Developer ID; notarization skipped (APPLE_ID / APPLE_TEAM_ID / APPLE_APP_PASSWORD not set)."
+          fi
+      - name: Unsigned build notice
+        if: env.MACOS_CERT_P12 == '' || env.MACOS_SIGN_IDENTITY == ''
+        run: echo "::notice::No Developer ID secrets; building an unsigned Promptly.app."
       - name: Build Promptly.app (Apple silicon)
         run: ./scripts/bundle-macos.sh
+      - name: Verify signature
+        if: env.APPLE_SIGN_IDENTITY != ''
+        run: |
+          codesign --verify --deep --strict --verbose=2 target/release/Promptly.app
+          if [ -n "${NOTARY_PROFILE:-}" ]; then
+            xcrun stapler validate target/release/Promptly.app
+            spctl --assess --type execute --verbose target/release/Promptly.app
+          fi
       - name: Zip
         run: |
           cd target/release

@@ -56,6 +56,22 @@ fn main() -> eframe::Result<()> {
         }
         std::env::remove_var(promptly_core::accounts::CONFIG_DIR_ENV);
     }
+    // Crashes are written locally; the next launch offers to report them.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic".into());
+        let at = info.location().map(|l| l.to_string());
+        let bt = std::backtrace::Backtrace::force_capture().to_string();
+        let report =
+            promptly_core::crash::report(&msg, at.as_deref(), &bt, env!("CARGO_PKG_VERSION"));
+        let _ = promptly_core::crash::save_in(&promptly_core::crash::dir(), &report);
+        default_hook(info);
+    }));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Promptly")

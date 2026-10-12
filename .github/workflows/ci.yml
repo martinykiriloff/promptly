@@ -30,3 +30,36 @@ jobs:
         run: |
           cargo build --release -p promptly-ctl
           cargo test -p promptly-core --test claude_contract hook_latency -- --ignored --nocapture
+
+  # Renders real UI states offscreen (Metal) and keeps the images, so a
+  # visual regression shows up as a changed screenshot on every push.
+  screenshots:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: GPU check
+        id: gpu
+        run: |
+          if system_profiler SPDisplaysDataType | grep -q "Metal"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No Metal device on this runner; screenshot tests skipped."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Screenshot tests
+        if: steps.gpu.outputs.ok == 'true'
+        env:
+          PROMPTLY_SHOTS: ${{ runner.temp }}/shots
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          cargo test -p promptly -- --ignored --test-threads=1 \
+            shots::themes_and_commits shots::settings_pages shots::light_theme_pages
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.gpu.outputs.ok == 'true'
+        with:
+          name: screenshots
+          path: ${{ runner.temp }}/shots/*.png
+          if-no-files-found: warn

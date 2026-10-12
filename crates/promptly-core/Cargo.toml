@@ -1,6 +1,6 @@
 [package]
 name = "promptly-core"
-version = "2026.9.0"
+version = "2026.10.0"
 edition = "2024"
 
 [dependencies]
@@ -12,7 +12,7 @@ notify = "8.2.0"
 rand = "0.10.3"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sha2 = "0.11.0"
 thiserror = "2.0.21"
 toml = "1.1.6"

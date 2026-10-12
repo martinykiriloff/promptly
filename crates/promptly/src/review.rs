@@ -1809,7 +1809,7 @@ fn seg2<T: PartialEq + Copy>(
 }
 
 /// Segmented control.
-fn seg<T: PartialEq + Copy>(
+pub(crate) fn seg<T: PartialEq + Copy>(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
     value: &mut T,
