@@ -60,6 +60,8 @@ pub struct SessionMeta {
     pub effort: Option<String>,
     /// Each file the agent edited, as it was before the first edit.
     pub baselines: Arc<session_changes::Baselines>,
+    /// The same, since the last prompt (reset on each UserPromptSubmit).
+    pub turn_baselines: Arc<session_changes::Baselines>,
     /// Cumulative cost (USD) and tokens over time, for burn rates and sparklines.
     pub cost_series: promptly_core::usage::Series,
     pub token_series: promptly_core::usage::Series,
@@ -97,6 +99,7 @@ impl SessionMeta {
             change_seq: 0,
             effort: None,
             baselines: Arc::default(),
+            turn_baselines: Arc::default(),
             cost_series: promptly_core::usage::Series::with_cap(2000),
             token_series: promptly_core::usage::Series::with_cap(2000),
             steps: VecDeque::new(),
@@ -432,21 +435,34 @@ impl ClaudeLink {
         let tx = lc.tx.clone();
         let ctx = lc.ctx.clone();
         let seen = Mutex::new(std::collections::HashSet::<PathBuf>::new());
+        let turn_seen = Mutex::new(std::collections::HashSet::<PathBuf>::new());
         let server = Server::spawn(socket, Some(token), move |msg| {
-            // Copy a file just before Claude first edits it, before taking the
-            // core lock: the hook client waits for this, so the copy is
-            // always of the file as it was.
-            let baseline = match &msg {
-                Incoming::Hook(v) => HookEvent::parse(v)
-                    .filter(|e| e.hook_event_name == "PreToolUse")
-                    .and_then(|e| session_changes::edited_path(&e))
-                    .filter(|p| seen.lock().insert(p.clone()))
-                    .map(|p| {
-                        let b = session_changes::capture(&p);
-                        (p, b)
-                    }),
+            // Copy a file just before Claude first edits it (in the session,
+            // and in the current turn), before taking the core lock: the hook
+            // client waits for this, so the copy is of the file as it was.
+            let ev = match &msg {
+                Incoming::Hook(v) => HookEvent::parse(v),
                 _ => None,
             };
+            let new_turn = ev
+                .as_ref()
+                .is_some_and(|e| e.hook_event_name == "UserPromptSubmit");
+            if new_turn {
+                turn_seen.lock().clear();
+            }
+            // (path, copy, first time in the session)
+            let baseline = ev
+                .as_ref()
+                .filter(|e| e.hook_event_name == "PreToolUse")
+                .and_then(session_changes::edited_path)
+                .and_then(|p| {
+                    let in_session = seen.lock().insert(p.clone());
+                    let in_turn = turn_seen.lock().insert(p.clone());
+                    (in_session || in_turn).then(|| {
+                        let b = session_changes::capture(&p);
+                        (p, b, in_session)
+                    })
+                });
             let note = {
                 let mut c = core.lock();
                 match msg {
@@ -462,8 +478,17 @@ impl ClaudeLink {
                         let Some(meta) = c.sessions.get_mut(&pane) else {
                             return;
                         };
-                        if let Some((path, base)) = baseline {
-                            Arc::make_mut(&mut meta.baselines)
+                        if new_turn {
+                            meta.turn_baselines = Arc::default();
+                            meta.change_seq += 1;
+                        }
+                        if let Some((path, base, in_session)) = baseline {
+                            if in_session {
+                                Arc::make_mut(&mut meta.baselines)
+                                    .entry(path.clone())
+                                    .or_insert(base.clone());
+                            }
+                            Arc::make_mut(&mut meta.turn_baselines)
                                 .entry(path)
                                 .or_insert(base);
                             meta.change_seq += 1;

@@ -210,6 +210,25 @@ pub fn parse_print_output(stdout: &str) -> Result<Suggestion, String> {
     parse_reply(result)
 }
 
+/// The plain text reply from `claude -p --output-format json`.
+pub fn parse_print_text(stdout: &str) -> Result<String, String> {
+    let envelope = stdout
+        .lines()
+        .rev()
+        .find_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .ok_or_else(|| first_line_or(stdout, "Claude returned nothing"))?;
+    let result = envelope
+        .get("result")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if envelope.get("is_error").and_then(|v| v.as_bool()) == Some(true) || result.is_empty() {
+        return Err(first_line_or(&result, "Claude reported an error"));
+    }
+    Ok(result)
+}
+
 /// Parse the model's reply: a JSON object, possibly inside a code fence.
 pub fn parse_reply(reply: &str) -> Result<Suggestion, String> {
     let start = reply.find('{');

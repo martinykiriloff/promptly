@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod local_models;
 pub mod nl_command;
 pub mod paths;
+pub mod permission;
 pub mod sanitize;
 pub mod session_changes;
 pub mod state;

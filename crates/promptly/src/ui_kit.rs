@@ -43,6 +43,10 @@ pub enum Icon {
     File,
     ChevronsUpDown,
     UserPlus,
+    Undo,
+    Commit,
+    PullRequest,
+    Upload,
     Users,
 }
 
@@ -78,6 +82,10 @@ impl Icon {
             Icon::File => 0xe0c0,
             Icon::ChevronsUpDown => 0xe211,
             Icon::UserPlus => 0xe470,
+            Icon::Undo => 0xe2a1,
+            Icon::Commit => 0xe0e3,
+            Icon::PullRequest => 0xe0e5,
+            Icon::Upload => 0xe45e,
             Icon::Users => 0xe472,
         };
         char::from_u32(code).unwrap_or('?')

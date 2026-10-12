@@ -229,6 +229,8 @@ pub enum DiffScope {
     Session,
     /// One commit at a time, picked from the branch's commits.
     Commits,
+    /// What the last prompt changed (like Session, reset on each prompt).
+    Turn,
 }
 
 /// A commit in the review's Commits list.
@@ -428,6 +430,194 @@ pub fn commit_diff(dir: &Path, sha: &str) -> Result<Vec<FileDiff>, String> {
     let mut files = parse_unified(&String::from_utf8_lossy(&out.stdout));
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
+}
+
+/// Stage everything and commit it. Returns the new commit's short hash.
+pub fn commit_all(root: &Path, message: &str) -> Result<String, String> {
+    let run = |args: &[&str]| -> Result<String, String> {
+        let out = git(root).args(args).output().map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Err(if err.is_empty() {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            } else {
+                err
+            })
+        }
+    };
+    if message.trim().is_empty() {
+        return Err("Write a commit message first".into());
+    }
+    run(&["add", "-A"])?;
+    run(&["commit", "-q", "-m", message.trim()])?;
+    run(&["rev-parse", "--short", "HEAD"])
+}
+
+/// Push the current branch, setting its upstream on the first push.
+pub fn push(root: &Path) -> Result<String, String> {
+    let has_upstream =
+        run_stdout(git(root).args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]))
+            .is_some();
+    let mut cmd = git(root);
+    if has_upstream {
+        cmd.args(["push", "--quiet"]);
+    } else {
+        cmd.args(["push", "--quiet", "--set-upstream", "origin", "HEAD"]);
+    }
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(current_branch(root).unwrap_or_else(|| "HEAD".into()))
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Everything uncommitted as diff text (for writing a commit message),
+/// cut at `max` bytes. Untracked files are listed by name.
+pub fn pending_diff_text(root: &Path, max: usize) -> String {
+    let mut text = run_stdout(git(root).args([
+        "-c",
+        "core.quotepath=off",
+        "diff",
+        "HEAD",
+        "--no-color",
+        "--stat",
+        "-p",
+    ]))
+    .unwrap_or_default();
+    if let Some(list) = run_stdout(git(root).args(["ls-files", "--others", "--exclude-standard"]))
+        && !list.trim().is_empty()
+    {
+        text.push_str("\n\nNew files:\n");
+        text.push_str(&list);
+    }
+    if text.len() > max {
+        let mut cut = max;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n…(truncated)");
+    }
+    text
+}
+
+/// The web page that opens a pull request (GitHub) or merge request
+/// (GitLab) for the current branch, from the `origin` remote.
+pub fn pull_request_url(root: &Path) -> Option<String> {
+    let remote = run_stdout(git(root).args(["remote", "get-url", "origin"]))?;
+    let branch = current_branch(root)?;
+    let base = default_base(root)
+        .map(|b| b.trim_start_matches("origin/").to_string())
+        .unwrap_or_else(|| "main".into());
+    pr_url_for(&remote, &branch, &base)
+}
+
+fn pr_url_for(remote: &str, branch: &str, base: &str) -> Option<String> {
+    let r = remote.trim().trim_end_matches(".git");
+    // git@host:owner/repo  or  https://host/owner/repo  or ssh://git@host/owner/repo
+    let (host, path) = if let Some(rest) = r.strip_prefix("git@") {
+        rest.split_once(':')?
+    } else {
+        let rest = r
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_start_matches("ssh://");
+        let rest = rest.split_once('@').map(|(_, h)| h).unwrap_or(rest);
+        rest.split_once('/')?
+    };
+    let host = host.split(':').next()?;
+    if host.contains("gitlab") {
+        Some(format!(
+            "https://{host}/{path}/-/merge_requests/new?merge_request%5Bsource_branch%5D={branch}&merge_request%5Btarget_branch%5D={base}"
+        ))
+    } else {
+        Some(format!(
+            "https://{host}/{path}/compare/{base}...{branch}?expand=1"
+        ))
+    }
+}
+
+/// Throw away uncommitted changes to one file: back to HEAD, or deleted if
+/// it is untracked.
+pub fn discard_file(root: &Path, rel: &str, untracked: bool) -> Result<(), String> {
+    let path = root.join(rel);
+    if untracked {
+        return std::fs::remove_file(&path).map_err(|e| e.to_string());
+    }
+    let out = git(root)
+        .args([
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+            rel,
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// A patch holding just the block (hunk) that starts at `hunk_line` in
+/// `f.lines`, for reversing it on its own.
+pub fn hunk_patch(f: &FileDiff, hunk_line: usize) -> Option<String> {
+    let first = f.lines.get(hunk_line)?;
+    if first.kind != LineKind::Hunk || f.path.starts_with('/') {
+        return None;
+    }
+    let mut p = format!("--- a/{0}\n+++ b/{0}\n{1}\n", f.path, first.text);
+    for l in &f.lines[hunk_line + 1..] {
+        let sign = match l.kind {
+            LineKind::Hunk => break,
+            LineKind::Context => ' ',
+            LineKind::Added => '+',
+            LineKind::Removed => '-',
+            LineKind::Meta => {
+                if l.text.starts_with('\\') {
+                    p.push_str(&l.text);
+                    p.push('\n');
+                }
+                continue;
+            }
+        };
+        p.push(sign);
+        p.push_str(&l.text);
+        p.push('\n');
+    }
+    Some(p)
+}
+
+/// Undo a patch in the working tree under `root` (works outside git
+/// repositories too: `git apply` then acts like `patch`).
+pub fn reverse_apply(root: &Path, patch: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["apply", "-R", "--whitespace=nowarn", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("no stdin")?
+        .write_all(patch.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 /// Working tree vs `rev` (or HEAD), plus untracked files.
@@ -858,5 +1048,128 @@ index 1..2 100644
         // The root commit diffs against nothing.
         let root = commit_diff(&repo, &list[0].sha).unwrap();
         assert_eq!(root[0].status, FileStatus::Added);
+    }
+
+    #[test]
+    fn discard_and_reverse_one_hunk() {
+        let t = tempfile::tempdir().unwrap();
+        let repo = t.path().join("r");
+        std::fs::create_dir(&repo).unwrap();
+        let g = |args: &[&str]| {
+            assert!(
+                git(&repo)
+                    .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        g(&["init", "-q", "-b", "main"]);
+        let body: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(repo.join("a.txt"), &body).unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "base"]);
+        // Two separate edits: two hunks.
+        let edited = body
+            .replace("line 2\n", "line TWO\n")
+            .replace("line 28\n", "line 28\nadded\n");
+        std::fs::write(repo.join("a.txt"), &edited).unwrap();
+        std::fs::write(repo.join("new.txt"), "x\n").unwrap();
+        let files = review_diff(&repo, DiffScope::Uncommitted).unwrap().files;
+        let a = files.iter().find(|f| f.path == "a.txt").unwrap();
+        let hunks: Vec<usize> = a
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == LineKind::Hunk)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hunks.len(), 2);
+        // Reverse only the second block.
+        reverse_apply(&repo, &hunk_patch(a, hunks[1]).unwrap()).unwrap();
+        let now = std::fs::read_to_string(repo.join("a.txt")).unwrap();
+        assert!(
+            now.contains("line TWO") && !now.contains("added"),
+            "only block 2 undone"
+        );
+        // Discard the rest of the file, and the untracked one.
+        discard_file(&repo, "a.txt", false).unwrap();
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), body);
+        discard_file(&repo, "new.txt", true).unwrap();
+        assert!(!repo.join("new.txt").exists());
+        assert!(
+            review_diff(&repo, DiffScope::Uncommitted)
+                .unwrap()
+                .files
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn commit_push_and_pr_links() {
+        let t = tempfile::tempdir().unwrap();
+        let repo = t.path().join("r");
+        let remote = t.path().join("remote.git");
+        std::fs::create_dir(&repo).unwrap();
+        let g = |dir: &Path, args: &[&str]| {
+            let o = git(dir)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        g(
+            t.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        g(&repo, &["init", "-q", "-b", "main"]);
+        g(&repo, &["config", "user.email", "t@t"]);
+        g(&repo, &["config", "user.name", "t"]);
+        g(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(repo.join("a.txt"), "1\n").unwrap();
+        assert!(commit_all(&repo, "  ").is_err(), "empty message refused");
+        let sha = commit_all(&repo, "First commit").unwrap();
+        assert!(!sha.is_empty());
+        assert!(push(&repo).is_ok(), "first push sets the upstream");
+        std::fs::write(repo.join("b.txt"), "2\n").unwrap();
+        assert!(pending_diff_text(&repo, 10_000).contains("b.txt"));
+        commit_all(&repo, "Second").unwrap();
+        push(&repo).unwrap();
+        let log = run_stdout(git(&remote).args(["log", "--format=%s", "main"])).unwrap();
+        assert_eq!(
+            log, "Second\nFirst commit",
+            "both commits reached the remote"
+        );
+
+        assert_eq!(
+            pr_url_for("git@github.com:me/shop.git", "feat/x", "main").unwrap(),
+            "https://github.com/me/shop/compare/main...feat/x?expand=1"
+        );
+        assert_eq!(
+            pr_url_for("https://github.com/me/shop", "f", "dev").unwrap(),
+            "https://github.com/me/shop/compare/dev...f?expand=1"
+        );
+        assert!(
+            pr_url_for("ssh://git@gitlab.com/team/app.git", "f", "main")
+                .unwrap()
+                .starts_with("https://gitlab.com/team/app/-/merge_requests/new")
+        );
     }
 }

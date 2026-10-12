@@ -514,3 +514,288 @@ fn themes_and_commits() {
     shot(&mut h, "commits-light");
     h.state_mut().demo_theme("Promptly");
 }
+
+/// A fresh folder for real-Claude tests (never an existing project).
+fn fresh_dir(tag: &str) -> std::path::PathBuf {
+    let base = std::env::var("PROMPTLY_TEST_ROOT").expect("PROMPTLY_TEST_ROOT: a scratch folder");
+    let d = std::path::Path::new(&base).join(format!(
+        "{tag}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    ));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// Start Claude in `dir` and wait for its prompt, accepting the one-time
+/// folder trust question.
+fn start_claude(h: &mut Harness<'_, App>, dir: &std::path::Path) -> crate::pty::PaneId {
+    use std::time::{Duration, Instant};
+    assert!(dir.is_dir(), "test folder must exist: {}", dir.display());
+    let id = h
+        .state_mut()
+        .demo_claude(dir.to_str().unwrap())
+        .expect("session");
+    let t0 = Instant::now();
+    let mut trusted = false;
+    loop {
+        let t1 = Instant::now();
+        while t1.elapsed() < Duration::from_millis(500) {
+            h.step();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let screen = h.state().demo_screen(id);
+        if !trusted && screen.contains("trust this folder") {
+            h.state().demo_type(id, b"\x1b[B");
+            std::thread::sleep(Duration::from_millis(300));
+            h.state().demo_type(id, b"\r");
+            trusted = true;
+            continue;
+        }
+        if screen.contains("Enter to continue") {
+            h.state().demo_type(id, b"\r");
+            continue;
+        }
+        if (screen.contains("❯") && !screen.contains("trust this folder"))
+            || t0.elapsed() > Duration::from_secs(60)
+        {
+            return id;
+        }
+    }
+}
+
+/// Approve and deny Claude's permission prompts from Promptly's buttons.
+///   PROMPTLY_TEST_ROOT=<scratch> cargo test -p promptly approve_deny_e2e -- --ignored --nocapture
+#[test]
+#[ignore]
+fn approve_deny_e2e() {
+    use promptly_core::state::SessionState;
+    use std::time::{Duration, Instant};
+    let shots = std::path::PathBuf::from(
+        std::env::var("PROMPTLY_SHOTS").unwrap_or_else(|_| "/tmp/promptly-shots".into()),
+    );
+    std::fs::create_dir_all(&shots).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    // SAFETY: test-only setup before any app threads start.
+    unsafe {
+        std::env::set_var("PROMPTLY_DATA_DIR", tmp.path().join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
+        for k in [
+            "PROMPTLY_CONTROL",
+            "PROMPTLY_SOCKET",
+            "PROMPTLY_TOKEN",
+            "PROMPTLY_SESSION",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_eframe(|cc| App::new(cc));
+    h.ctx.set_os(egui::os::OperatingSystem::Mac);
+    let pump = |h: &mut Harness<'_, App>, secs: f32| {
+        let t0 = Instant::now();
+        while t0.elapsed().as_secs_f32() < secs {
+            h.step();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // Normal permission mode, so Claude asks.
+    h.state_mut()
+        .demo_claude_args(&["--permission-mode", "default"]);
+    for (approve, file) in [(true, "approved.txt"), (false, "denied.txt")] {
+        let dir = fresh_dir(if approve { "approve" } else { "deny" });
+        let id = start_claude(&mut h, &dir);
+        pump(&mut h, 1.0);
+        h.state_mut().demo_send(
+            id,
+            &format!(
+                "Run exactly this shell command with the Bash tool and nothing else: touch {file}"
+            ),
+        );
+        let t0 = Instant::now();
+        let prompt = loop {
+            pump(&mut h, 0.5);
+            if let Some(p) = h.state().demo_permission(id) {
+                break p;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(120),
+                "no permission prompt"
+            );
+        };
+        assert_eq!(
+            h.state().demo_state(id),
+            Some(SessionState::WaitingPermission)
+        );
+        println!("options: {:?}", prompt.options);
+        if approve {
+            let img = h.render().unwrap();
+            img.save(shots.join("permission-buttons.png")).unwrap();
+        }
+        let choice = if approve {
+            prompt.approve_option().expect("a Yes option")
+        } else {
+            prompt.deny_option().expect("a No option")
+        };
+        h.state_mut().demo_answer(id, choice);
+        let t0 = Instant::now();
+        while h.state().demo_permission(id).is_some() && t0.elapsed() < Duration::from_secs(20) {
+            pump(&mut h, 0.3);
+        }
+        pump(&mut h, 4.0);
+        let exists = dir.join(file).exists();
+        println!(
+            "{}: {file} exists = {exists}",
+            if approve { "approve" } else { "deny" }
+        );
+        assert_eq!(exists, approve);
+    }
+}
+
+/// Per-prompt changes, revert, and commit + push with a Claude-written
+/// message, on a real session.
+///   PROMPTLY_TEST_ROOT=<scratch> cargo test -p promptly review_actions_e2e -- --ignored --nocapture
+#[test]
+#[ignore]
+fn review_actions_e2e() {
+    use promptly_core::git::DiffScope;
+    use promptly_core::state::SessionState;
+    use std::time::{Duration, Instant};
+    let tmp = tempfile::tempdir().unwrap();
+    // SAFETY: test-only setup before any app threads start.
+    unsafe {
+        std::env::set_var("PROMPTLY_DATA_DIR", tmp.path().join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("run"));
+        for k in [
+            "PROMPTLY_CONTROL",
+            "PROMPTLY_SOCKET",
+            "PROMPTLY_TOKEN",
+            "PROMPTLY_SESSION",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+    let repo = fresh_dir("review");
+    let remote = fresh_dir("remote").join("r.git");
+    let g = |dir: &std::path::Path, args: &[&str]| {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.email=t@t", "-c", "user.name=Tester"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stdout).to_string()
+    };
+    g(
+        remote.parent().unwrap(),
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            remote.to_str().unwrap(),
+        ],
+    );
+    g(&repo, &["init", "-q", "-b", "main"]);
+    g(&repo, &["config", "user.email", "t@t"]);
+    g(&repo, &["config", "user.name", "Tester"]);
+    g(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    std::fs::write(repo.join("README.md"), "# Demo\n").unwrap();
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "init"]);
+
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .wgpu()
+        .build_eframe(|cc| App::new(cc));
+    let pump = |h: &mut Harness<'_, App>, secs: f32| {
+        let t0 = Instant::now();
+        while t0.elapsed().as_secs_f32() < secs {
+            h.step();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // Edits without asking, so the turns run unattended.
+    h.state_mut()
+        .demo_claude_args(&["--permission-mode", "acceptEdits"]);
+    let id = start_claude(&mut h, &repo);
+    pump(&mut h, 1.0);
+    let turn = |h: &mut Harness<'_, App>, text: &str| {
+        h.state_mut().demo_send(id, text);
+        let t0 = Instant::now();
+        while h.state().demo_state(id) != Some(SessionState::Working)
+            && t0.elapsed() < Duration::from_secs(30)
+        {
+            pump(h, 0.3);
+        }
+        let t0 = Instant::now();
+        while h.state().demo_state(id) == Some(SessionState::Working)
+            && t0.elapsed() < Duration::from_secs(180)
+        {
+            pump(h, 0.5);
+        }
+        pump(h, 1.5);
+    };
+    turn(
+        &mut h,
+        "Create a file notes.md containing exactly one line: alpha. Use the Write tool. Do nothing else.",
+    );
+    turn(
+        &mut h,
+        "Append a second line beta to notes.md, and create todo.md containing exactly one line: x. Use the Edit and Write tools. Do nothing else.",
+    );
+    let session = h.state().demo_changes(id, false);
+    let last = h.state().demo_changes(id, true);
+    println!("session: {session:?}\nlast prompt: {last:?}");
+    assert_eq!(
+        session.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(),
+        ["notes.md", "todo.md"]
+    );
+    assert_eq!(
+        last,
+        [
+            ("notes.md".to_string(), 1, 0),
+            ("todo.md".to_string(), 1, 0)
+        ],
+        "only the second prompt's edits"
+    );
+
+    // Revert notes.md in the Last prompt view: back to after prompt 1.
+    h.state_mut().demo_review(DiffScope::Turn, None);
+    pump(&mut h, 2.0);
+    let msg = h.state_mut().demo_revert_file("notes.md").unwrap();
+    println!("{msg}");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("notes.md"))
+            .unwrap()
+            .trim(),
+        "alpha"
+    );
+
+    // Commit with a Claude-written message, then push.
+    let message = h.state().demo_commit_message(&repo).unwrap();
+    println!("message: {message:?}");
+    assert!(!message.is_empty() && message.lines().next().unwrap().len() <= 100);
+    promptly_core::git::commit_all(&repo, &message).unwrap();
+    promptly_core::git::push(&repo).unwrap();
+    let pushed = g(&remote, &["log", "-1", "--format=%s", "main"]);
+    println!("remote head: {pushed}");
+    assert_eq!(pushed.trim(), message.lines().next().unwrap().trim());
+}

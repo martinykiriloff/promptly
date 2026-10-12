@@ -333,6 +333,10 @@ pub struct App {
     control_path: Option<PathBuf>,
     ctl_path: Option<PathBuf>,
     hooks_locked: bool,
+    /// The commit sheet, while open.
+    commit_sheet: Option<CommitSheet>,
+    /// Notices from background work (push, commit), shown as notifications.
+    bg_notices: Arc<Mutex<Vec<String>>>,
     /// Notifications shown at the top, newest last: (id, text, shown at).
     toasts: Vec<(u64, String, Instant)>,
     toast_seq: u64,
@@ -502,6 +506,8 @@ impl App {
             hooks_locked: hooks::managed_hooks_disabled(),
             ctl_path,
             toasts: Vec::new(),
+            commit_sheet: None,
+            bg_notices: Arc::default(),
             toast_seq: 0,
             focus_terminal: true,
             last_poll: Instant::now() - Duration::from_secs(60),
@@ -1517,6 +1523,185 @@ impl App {
             .map(|(_, s)| self.ctx.format_shortcut(s))
     }
 
+    /// Claude's permission prompt, if one is on this session's screen.
+    fn permission_prompt(&self, id: PaneId) -> Option<promptly_core::permission::Prompt> {
+        let e = self.panes.get(&id)?;
+        promptly_core::permission::parse(&term_view::screen_text(&e.pane, 80).join("\n"))
+    }
+
+    /// Press the choice the user clicked, after checking the prompt is still
+    /// on screen (Promptly never answers on its own).
+    fn answer_permission(&mut self, id: PaneId, choice: u8) {
+        let Some(keys) = self.permission_prompt(id).and_then(|p| p.keys_for(choice)) else {
+            self.toast("That permission prompt is no longer open");
+            return;
+        };
+        if let Some(e) = self.panes.get(&id) {
+            e.pane.write(keys);
+        }
+    }
+
+    /// Push in the background; the result arrives as a notification.
+    fn git_push(&mut self, root: PathBuf) {
+        let (notices, ctx) = (self.bg_notices.clone(), self.ctx.clone());
+        self.toast("Pushing…");
+        std::thread::spawn(move || {
+            let msg = match promptly_core::git::push(&root) {
+                Ok(branch) => format!("Pushed {branch}"),
+                Err(e) => format!("Push failed: {}", e.lines().last().unwrap_or(&e)),
+            };
+            notices.lock().push(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    /// How to run `claude -p` for the active session (its account and model).
+    fn claude_launch(&self, cwd: PathBuf) -> crate::ask::Launch {
+        let c = self.core.lock();
+        let acct = self
+            .active
+            .and_then(|id| c.sessions.get(&id))
+            .and_then(|m| c.account(&m.account))
+            .unwrap_or_else(|| c.active());
+        crate::ask::Launch {
+            shell: shell_integration::user_shell(self.cfg.shell.as_deref()),
+            binary: self.cfg.claude.binary.clone(),
+            model: acct
+                .local
+                .as_ref()
+                .map(|l| l.model.clone())
+                .unwrap_or_else(|| self.ai_model.clone()),
+            cwd,
+            config_dir: acct.env_value(),
+            env: acct.session_env(),
+        }
+    }
+
+    /// Commit sheet: message (or "Write with Claude"), then Commit or
+    /// Commit & push.
+    fn commit_sheet_ui(&mut self, ctx: &egui::Context) {
+        use theme::tokens as t;
+        let Some(mut sheet) = self.commit_sheet.take() else {
+            return;
+        };
+        // A drafted message arrived.
+        if let Some(slot) = sheet.writing.clone()
+            && let Some(r) = slot.lock().take()
+        {
+            sheet.writing = None;
+            match r {
+                Ok(m) => sheet.message = m,
+                Err(e) => self.toast(format!("Couldn't write a message: {e}")),
+            }
+        }
+        let mut close = false;
+        let mut commit = false;
+        let mut write = false;
+        let modal = egui::Modal::new(egui::Id::new("commit-sheet"))
+            .frame(kit::floating_frame().inner_margin(egui::Margin::same(20)))
+            .show(ctx, |ui| {
+                ui.set_width(560.0);
+                ui.label(
+                    RichText::new("Commit all changes")
+                        .size(16.0)
+                        .strong()
+                        .color(t::TEXT()),
+                );
+                ui.label(
+                    RichText::new(short_path(&sheet.root.to_string_lossy()))
+                        .monospace()
+                        .size(11.5)
+                        .color(t::TEXT_3()),
+                );
+                ui.add_space(10.0);
+                ui.add(
+                    egui::TextEdit::multiline(&mut sheet.message)
+                        .hint_text("Commit message")
+                        .desired_rows(6)
+                        .desired_width(f32::INFINITY)
+                        .font(FontId::monospace(13.0)),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if sheet.writing.is_some() {
+                        ui.add(egui::Spinner::new().size(14.0));
+                        ui.label(
+                            RichText::new("Claude is writing…")
+                                .size(12.0)
+                                .color(t::TEXT_2()),
+                        );
+                        ctx.request_repaint_after(Duration::from_millis(200));
+                    } else if kit::secondary_button(ui, Some(Icon::Sparkle), "Write with Claude")
+                        .clicked()
+                    {
+                        write = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let ok = !sheet.message.trim().is_empty();
+                        ui.add_enabled_ui(ok, |ui| {
+                            if kit::primary_button(
+                                ui,
+                                Some(Icon::Commit),
+                                "Commit & push",
+                                None,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                commit = true;
+                                sheet.push = true;
+                            }
+                            if kit::secondary_button(ui, None, "Commit").clicked() {
+                                commit = true;
+                            }
+                        });
+                        if kit::secondary_button(ui, None, "Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if modal.should_close() {
+            close = true;
+        }
+        if write {
+            let slot = Arc::new(Mutex::new(None));
+            sheet.writing = Some(slot.clone());
+            let launch = self.claude_launch(sheet.root.clone());
+            let diff = promptly_core::git::pending_diff_text(&sheet.root, 30_000);
+            let ctx = self.ctx.clone();
+            std::thread::spawn(move || {
+                let system = "You write git commit messages. Reply with only the message: a subject line of at most 72 characters in the imperative mood, then a blank line and a few short bullet points if the change needs them. No code fences.";
+                let r = crate::ask::claude_text(
+                    &launch,
+                    system,
+                    &format!("Write the commit message for these changes:\n\n{diff}"),
+                );
+                *slot.lock() = Some(r);
+                ctx.request_repaint();
+            });
+        }
+        if commit {
+            match promptly_core::git::commit_all(&sheet.root, &sheet.message) {
+                Ok(sha) => {
+                    self.toast(format!("Committed {sha}"));
+                    self.review.reload_soon();
+                    if sheet.push {
+                        self.git_push(sheet.root.clone());
+                    }
+                }
+                Err(e) => {
+                    self.toast(format!("Commit failed: {e}"));
+                    self.commit_sheet = Some(sheet);
+                }
+            }
+            return;
+        }
+        if !close {
+            self.commit_sheet = Some(sheet);
+        }
+    }
+
     /// Ask Claude to turn `request` into a command for shell pane `id`.
     fn start_ask(&mut self, id: PaneId, request: String) {
         static OS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -2417,13 +2602,16 @@ impl App {
     /// The review pane, docked on the right or full width like a PR page.
     fn review_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, full: bool) {
         let target = self.active.and_then(|id| {
-            self.core
-                .lock()
-                .sessions
-                .get(&id)
-                .map(|m| (m.cwd.clone(), m.change_seq, m.baselines.clone()))
+            self.core.lock().sessions.get(&id).map(|m| {
+                (
+                    m.cwd.clone(),
+                    m.change_seq,
+                    m.baselines.clone(),
+                    m.turn_baselines.clone(),
+                )
+            })
         });
-        let Some((cwd, seq, baselines)) = target else {
+        let Some((cwd, seq, baselines, turn_baselines)) = target else {
             ui.add_space(48.0);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("No session selected").color(theme::tokens::TEXT_3()));
@@ -2431,9 +2619,29 @@ impl App {
             return;
         };
         self.review.baselines = baselines;
+        self.review.turn_baselines = turn_baselines;
         self.review.sync(&cwd, seq, ctx);
         match self.review.show(ui, full) {
             Some(ReviewAction::OpenInEditor(path, line)) => self.open_in_editor(&path, line),
+            Some(ReviewAction::Notice(msg)) => self.toast(msg),
+            Some(ReviewAction::Commit(root)) => {
+                self.commit_sheet = Some(CommitSheet {
+                    root,
+                    message: String::new(),
+                    writing: None,
+                    push: false,
+                })
+            }
+            Some(ReviewAction::Push(root)) => self.git_push(root),
+            Some(ReviewAction::PullRequest(root)) => {
+                match promptly_core::git::pull_request_url(&root) {
+                    Some(url) => {
+                        open_external(&url);
+                        self.toast("Opened the pull request page in your browser");
+                    }
+                    None => self.toast("This repository has no GitHub or GitLab origin remote"),
+                }
+            }
             Some(ReviewAction::SendFeedback(text)) => {
                 if let Some(id) = self.active {
                     self.send_prompt(id, &text);
@@ -3045,6 +3253,7 @@ impl App {
 
     fn pane_header(&mut self, ui: &mut egui::Ui, id: PaneId, is_active: bool) {
         let mut allow_clip = None;
+        let mut answer: Option<u8> = None;
         let mut actions = vec![];
         {
             let c = self.core.lock();
@@ -3201,18 +3410,21 @@ impl App {
                     }
                 });
             }
-            if let (SessionState::WaitingPermission, Some(d)) = (m.state(), &m.attention_detail) {
-                let d = d.clone();
+            if m.state() == SessionState::WaitingPermission {
+                let detail = m.attention_detail.clone();
+                let prompt = self.permission_prompt(id);
                 callout(ui, theme::AMBER(), |ui| {
-                    ui.label(
-                        RichText::new("Approve in the terminal below:")
-                            .color(theme::tokens::TEXT_1()),
-                    );
-                    ui.label(RichText::new(d).monospace().color(theme::tokens::TEXT()));
+                    if let Some(choice) = permission_buttons(ui, prompt.as_ref(), detail.as_deref())
+                    {
+                        answer = Some(choice);
+                    }
                 });
             }
         }
         drop(c);
+        if let Some(n) = answer {
+            self.answer_permission(id, n);
+        }
         if let Some(allow) = allow_clip {
             let mut c = self.core.lock();
             if let Some(m) = c.sessions.get_mut(&id) {
@@ -3979,6 +4191,11 @@ impl App {
 
         self.settings_window(ctx);
         self.add_account_sheet(ctx);
+        self.commit_sheet_ui(ctx);
+        let notices: Vec<String> = std::mem::take(&mut *self.bg_notices.lock());
+        for n in notices {
+            self.toast(n);
+        }
         self.log_window(ctx);
         self.transcript_window(ctx);
 
@@ -5469,6 +5686,73 @@ impl App {
             .map(|m| (m.account.clone(), m.status.cost_usd, m.status.model.clone()))
     }
 
+    /// Extra `claude` arguments for new sessions (tests).
+    pub fn demo_claude_args(&mut self, args: &[&str]) {
+        self.cfg.claude.extra_args = args.iter().map(|a| a.to_string()).collect();
+    }
+
+    /// The permission prompt on screen, and answering it like the buttons do.
+    pub fn demo_permission(&self, id: PaneId) -> Option<promptly_core::permission::Prompt> {
+        self.permission_prompt(id)
+    }
+
+    pub fn demo_answer(&mut self, id: PaneId, choice: u8) {
+        self.answer_permission(id, choice);
+    }
+
+    /// Files in the session's This session / Last prompt views (tests).
+    pub fn demo_changes(&self, id: PaneId, turn: bool) -> Vec<(String, u32, u32)> {
+        let (cwd, base) = {
+            let c = self.core.lock();
+            let Some(m) = c.sessions.get(&id) else {
+                return vec![];
+            };
+            (
+                m.cwd.clone(),
+                if turn {
+                    m.turn_baselines.clone()
+                } else {
+                    m.baselines.clone()
+                },
+            )
+        };
+        promptly_core::session_changes::diff(&cwd, &base)
+            .map(|d| {
+                d.files
+                    .into_iter()
+                    .map(|f| (f.path, f.added, f.removed))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Revert a file in the review's current view, like the Revert button.
+    pub fn demo_revert_file(&mut self, path: &str) -> Result<String, String> {
+        let d = self.review.shown().cloned().ok_or("review not loaded")?;
+        let fi = d
+            .files
+            .iter()
+            .position(|f| f.path == path)
+            .ok_or("file not listed")?;
+        self.review.demo_do_revert(&d, fi)
+    }
+
+    /// Draft a commit message with Claude, like the sheet's button (blocking).
+    pub fn demo_commit_message(&self, root: &std::path::Path) -> Result<String, String> {
+        let launch = self.claude_launch(root.to_path_buf());
+        let diff = promptly_core::git::pending_diff_text(root, 30_000);
+        crate::ask::claude_text(
+            &launch,
+            "You write git commit messages. Reply with only the message: a subject line of at most 72 characters in the imperative mood, then a blank line and a few short bullet points if the change needs them. No code fences.",
+            &format!("Write the commit message for these changes:\n\n{diff}"),
+        )
+    }
+
+    /// The session's state (tests).
+    pub fn demo_state(&self, id: PaneId) -> Option<SessionState> {
+        self.core.lock().sessions.get(&id).map(|m| m.state())
+    }
+
     /// Start a plain shell in `cwd` (tests).
     pub fn demo_shell(&mut self, cwd: &str) -> Option<PaneId> {
         self.spawn(NewSession {
@@ -5868,6 +6152,91 @@ fn theme_card(ui: &mut egui::Ui, p: &theme::Palette, w: f32, selected: bool) -> 
     painter.rect_stroke(rect, r, stroke, egui::StrokeKind::Inside);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(p.name)
+}
+
+/// Approve / deny buttons for Claude's permission prompt: exactly Claude's
+/// own choices. Returns the choice clicked.
+fn permission_buttons(
+    ui: &mut egui::Ui,
+    prompt: Option<&promptly_core::permission::Prompt>,
+    detail: Option<&str>,
+) -> Option<u8> {
+    use theme::tokens as t;
+    let mut picked = None;
+    ui.vertical(|ui| {
+        ui.label(
+            RichText::new(
+                prompt
+                    .map(|p| p.question.as_str())
+                    .unwrap_or("Claude needs your approval"),
+            )
+            .size(13.0)
+            .strong()
+            .color(t::TEXT()),
+        );
+        let request: Vec<String> = match prompt {
+            Some(p) if !p.request.is_empty() => p.request.clone(),
+            _ => detail.map(|d| vec![d.to_string()]).unwrap_or_default(),
+        };
+        for line in request.iter().take(6) {
+            ui.label(
+                RichText::new(line)
+                    .monospace()
+                    .size(12.0)
+                    .color(t::TEXT_1()),
+            );
+        }
+        let Some(p) = prompt else {
+            ui.label(
+                RichText::new("Answer in the terminal below.")
+                    .size(12.0)
+                    .color(t::TEXT_2()),
+            );
+            return;
+        };
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            for (n, label) in &p.options {
+                // Keep buttons short: drop Claude's trailing hints.
+                let short = label
+                    .split(" · ")
+                    .next()
+                    .unwrap_or(label)
+                    .split(" (")
+                    .next()
+                    .unwrap_or(label);
+                let short: String = if short.chars().count() > 44 {
+                    format!("{}…", short.chars().take(42).collect::<String>().trim_end())
+                } else {
+                    short.to_string()
+                };
+                let text = format!("{n}  {short}");
+                let r = if Some(*n) == p.approve_option() {
+                    kit::primary_button(ui, Some(Icon::Check), &text, None, false)
+                } else {
+                    kit::secondary_button(ui, None, &text)
+                };
+                if r.on_hover_text(label.as_str()).clicked() {
+                    picked = Some(*n);
+                }
+            }
+        });
+    });
+    picked
+}
+
+/// A result a background thread fills in.
+type Pending<T> = Arc<Mutex<Option<Result<T, String>>>>;
+
+/// The commit sheet's state.
+struct CommitSheet {
+    root: PathBuf,
+    message: String,
+    /// "Write with Claude" in flight.
+    writing: Option<Pending<String>>,
+    /// Commit and then push.
+    push: bool,
 }
 
 /// Settings-row control: a switch bound to `on`; yields whether it changed.

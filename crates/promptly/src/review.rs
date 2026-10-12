@@ -42,6 +42,8 @@ pub struct ReviewState {
     loaded: Option<(u64, DiffScope, Option<String>)>,
     /// Commits scope: the commit shown (None = newest).
     pub commit: Option<String>,
+    /// A revert waiting for confirmation: (file index, hunk line or None).
+    pending_revert: Option<(usize, Option<usize>)>,
     loaded_at: Option<Instant>,
     result: DiffSlot,
     loading: bool,
@@ -52,6 +54,8 @@ pub struct ReviewState {
     is_repo: bool,
     /// Files the session's agent edited, as they were before (set by the app).
     pub baselines: std::sync::Arc<promptly_core::session_changes::Baselines>,
+    /// The same since the last prompt.
+    pub turn_baselines: std::sync::Arc<promptly_core::session_changes::Baselines>,
     pub split: bool,
     viewed: HashSet<String>,
     collapsed: HashSet<String>,
@@ -70,6 +74,12 @@ struct Draft {
 }
 
 pub enum ReviewAction {
+    /// Show a notification.
+    Notice(String),
+    /// Git actions for the repository at this root.
+    Commit(std::path::PathBuf),
+    Push(std::path::PathBuf),
+    PullRequest(std::path::PathBuf),
     Close,
     ToggleFull,
     OpenInEditor(PathBuf, Option<u32>),
@@ -161,17 +171,140 @@ impl ReviewState {
         let slot = self.result.clone();
         let ctx = ctx.clone();
         let scope = self.scope;
-        let baselines = self.baselines.clone();
+        let baselines = match self.scope {
+            DiffScope::Turn => self.turn_baselines.clone(),
+            _ => self.baselines.clone(),
+        };
         let want = self.commit.clone();
         std::thread::spawn(move || {
             let r = match scope {
                 DiffScope::Session => promptly_core::session_changes::diff(&dir, &baselines),
+                DiffScope::Turn => {
+                    promptly_core::session_changes::diff(&dir, &baselines).map(|mut d| {
+                        d.scope = DiffScope::Turn;
+                        d
+                    })
+                }
                 DiffScope::Commits => commits_diff(&dir, want.as_deref()),
                 _ => git::review_diff(&dir, scope),
             };
             *slot.lock() = Some(r);
             ctx.request_repaint();
         });
+    }
+
+    /// Reload at the next sync (after a commit).
+    pub fn reload_soon(&mut self) {
+        self.loaded = None;
+    }
+
+    /// Reverting is offered where it only touches the working tree.
+    fn can_revert(&self, d: &ReviewDiff) -> bool {
+        matches!(
+            d.scope,
+            DiffScope::Uncommitted | DiffScope::Session | DiffScope::Turn
+        )
+    }
+
+    /// Carry out a confirmed revert.
+    fn do_revert(
+        &mut self,
+        d: &ReviewDiff,
+        fi: usize,
+        hunk: Option<usize>,
+    ) -> Result<String, String> {
+        let f = d
+            .files
+            .get(fi)
+            .ok_or("That file is no longer in the list")?;
+        match (d.scope, hunk) {
+            (_, Some(li)) => {
+                let patch = git::hunk_patch(f, li).ok_or("Can't revert this block")?;
+                git::reverse_apply(&d.root, &patch)?;
+                Ok(format!("Reverted a block in {}", f.path))
+            }
+            (DiffScope::Session | DiffScope::Turn, None) => {
+                let path = if f.path.starts_with('/') {
+                    std::path::PathBuf::from(&f.path)
+                } else {
+                    d.root.join(&f.path)
+                };
+                let set = if d.scope == DiffScope::Turn {
+                    &self.turn_baselines
+                } else {
+                    &self.baselines
+                };
+                let base = set.get(&path).ok_or("No saved copy of this file")?;
+                promptly_core::session_changes::revert(&path, base)?;
+                Ok(if d.scope == DiffScope::Turn {
+                    format!("Reverted {} to before your last prompt", f.path)
+                } else {
+                    format!("Reverted {} to before the agent's edits", f.path)
+                })
+            }
+            (_, None) => {
+                git::discard_file(&d.root, &f.path, f.untracked)?;
+                Ok(format!("Discarded changes to {}", f.path))
+            }
+        }
+    }
+
+    /// Confirmation sheet for a pending revert.
+    fn revert_sheet(&mut self, ctx: &egui::Context, d: &ReviewDiff) -> Option<ReviewAction> {
+        let (fi, hunk) = self.pending_revert?;
+        let name = d.files.get(fi).map(|f| f.path.clone()).unwrap_or_default();
+        let mut go = false;
+        let mut close = false;
+        let m = egui::Modal::new(egui::Id::new("revert-sheet"))
+            .frame(kit::floating_frame().inner_margin(egui::Margin::same(20)))
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.label(
+                    RichText::new(if hunk.is_some() { "Revert this block?" } else { "Revert this file?" })
+                        .size(16.0)
+                        .strong()
+                        .color(t::TEXT()),
+                );
+                ui.add_space(6.0);
+                let body = match (d.scope, hunk) {
+                    (_, Some(_)) => format!("The block's changes to {name} are undone. The rest of the file stays."),
+                    (DiffScope::Session, None) => format!("{name} goes back to how it was before the agent first edited it (removed if the agent created it)."),
+                    (DiffScope::Turn, None) => format!("{name} goes back to how it was before your last prompt."),
+                    _ => format!("Uncommitted changes to {name} are thrown away. This can't be undone."),
+                };
+                ui.label(RichText::new(body).size(12.5).color(t::TEXT_2()));
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if kit::primary_button(ui, Some(kit::Icon::Undo), "Revert", None, false).clicked() {
+                            go = true;
+                        }
+                        if kit::secondary_button(ui, None, "Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if m.should_close() {
+            close = true;
+        }
+        if go {
+            self.pending_revert = None;
+            self.loaded = None;
+            return Some(ReviewAction::Notice(match self.do_revert(d, fi, hunk) {
+                Ok(msg) => msg,
+                Err(e) => format!("Couldn't revert: {e}"),
+            }));
+        }
+        if close {
+            self.pending_revert = None;
+        }
+        None
+    }
+
+    #[cfg(test)]
+    pub fn demo_do_revert(&mut self, d: &ReviewDiff, fi: usize) -> Result<String, String> {
+        self.do_revert(d, fi, None)
     }
 
     /// The diff on screen (tests).
@@ -247,6 +380,7 @@ impl ReviewState {
                     (DiffScope::Uncommitted, "Uncommitted"),
                     (DiffScope::Commits, "Commits"),
                     (DiffScope::Session, "This session"),
+                    (DiffScope::Turn, "Last prompt"),
                 ],
             );
         } else {
@@ -254,7 +388,10 @@ impl ReviewState {
                 &mut h,
                 ("seg-scope",),
                 &mut scope,
-                &[(DiffScope::Session, "This session")],
+                &[
+                    (DiffScope::Session, "This session"),
+                    (DiffScope::Turn, "Last prompt"),
+                ],
             );
         }
         if scope != self.scope {
@@ -276,6 +413,20 @@ impl ReviewState {
             }
             if kit::icon_button(ui, Icon::Refresh, "Refresh", self.loading).clicked() {
                 self.loaded = None;
+            }
+            if self.is_repo
+                && let Some(root) = self.diff.as_ref().map(|d| d.root.clone())
+            {
+                ui.add_space(6.0);
+                if kit::icon_button(ui, Icon::PullRequest, "Open a pull request", false).clicked() {
+                    action = Some(ReviewAction::PullRequest(root.clone()));
+                }
+                if kit::icon_button(ui, Icon::Upload, "Push this branch", false).clicked() {
+                    action = Some(ReviewAction::Push(root.clone()));
+                }
+                if kit::icon_button(ui, Icon::Commit, "Commit all changes…", false).clicked() {
+                    action = Some(ReviewAction::Commit(root));
+                }
             }
             ui.add_space(6.0);
             seg2(
@@ -363,6 +514,7 @@ impl ReviewState {
                     (_, DiffScope::Session) => {
                         "Edited by this session's agent, live as it works".to_string()
                     }
+                    (_, DiffScope::Turn) => "Changed by your last prompt".to_string(),
                     _ if self.scope == DiffScope::Branch => format!(
                         "{}: no base branch, showing uncommitted changes",
                         d.branch.clone().unwrap_or_default()
@@ -403,6 +555,10 @@ impl ReviewState {
 
         if d.files.is_empty() && (d.scope != DiffScope::Commits || d.commits.is_empty()) {
             let (title, body) = match d.scope {
+                DiffScope::Turn => (
+                    "No edits from the last prompt",
+                    "Files Claude edits after your latest prompt appear here; each new prompt starts fresh.",
+                ),
                 DiffScope::Commits => (
                     "No commits",
                     "This branch has no commits of its own yet. Commits appear here as they are made.",
@@ -422,6 +578,10 @@ impl ReviewState {
             };
             empty_state(ui, title, body);
             return action;
+        }
+
+        if let Some(a) = self.revert_sheet(ui.ctx(), &d) {
+            action = Some(a);
         }
 
         // Pending comments and the comment editor sit above the diff.
@@ -805,6 +965,8 @@ impl ReviewState {
                     }
                     self.selected = Some(fi);
                 }
+                RowClick::Revert(fi) => self.pending_revert = Some((fi, None)),
+                RowClick::RevertHunk(fi, li) => self.pending_revert = Some((fi, Some(li))),
                 RowClick::ToggleViewed(fi) => {
                     let p = d.files[fi].path.clone();
                     if !self.viewed.remove(&p) {
@@ -920,6 +1082,34 @@ impl ReviewState {
                 });
                 let resp = ui.interact(r, ui.id().with(("ln", idx)), Sense::click());
                 paint_line(ui, r, Some(l), true, commented, resp.hovered());
+                if l.kind == LineKind::Hunk && self.can_revert(d) && resp.hovered() {
+                    let br = Rect::from_min_size(
+                        pos2(r.max.x - 112.0, r.min.y + 1.0),
+                        vec2(104.0, r.height() - 2.0),
+                    );
+                    let b = ui.interact(br, ui.id().with(("revert-hunk", idx)), Sense::click());
+                    ui.painter()
+                        .rect_filled(br, CornerRadius::same(5), t::BG_ELEVATED_2());
+                    kit::paint_icon(
+                        ui,
+                        Rect::from_center_size(
+                            pos2(br.min.x + 12.0, br.center().y),
+                            vec2(11.0, 11.0),
+                        ),
+                        kit::Icon::Undo,
+                        t::TEXT_1(),
+                    );
+                    ui.painter().text(
+                        pos2(br.min.x + 22.0, br.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        "Revert block",
+                        FontId::proportional(11.5),
+                        t::TEXT_1(),
+                    );
+                    if b.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        return Some(RowClick::RevertHunk(fi, li));
+                    }
+                }
                 if l.kind != LineKind::Hunk && l.kind != LineKind::Meta {
                     let resp = resp
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1036,7 +1226,7 @@ impl ReviewState {
         let mut click = None;
 
         // Chevron + path area toggles folding.
-        let fold_r = Rect::from_min_max(r.min, pos2(r.max.x - 140.0, r.max.y));
+        let fold_r = Rect::from_min_max(r.min, pos2(r.max.x - 172.0, r.max.y));
         let fold = ui.interact(fold_r, id.with("fold"), Sense::click());
         let cx = r.min.x + 16.0;
         let cy = r.center().y;
@@ -1126,7 +1316,7 @@ impl ReviewState {
         }
 
         // Viewed checkbox: borderless until hovered.
-        let vr = Rect::from_min_size(pos2(r.max.x - 132.0, cy - 13.0), vec2(84.0, 26.0));
+        let vr = Rect::from_min_size(pos2(r.max.x - 164.0, cy - 13.0), vec2(84.0, 26.0));
         let vresp = ui.interact(vr, id.with("viewed"), Sense::click());
         let vh = kit::hover_t(ui, &vresp);
         ui.painter().rect_filled(
@@ -1174,6 +1364,35 @@ impl ReviewState {
             .clicked()
         {
             click = Some(RowClick::ToggleViewed(fi));
+        }
+
+        // Revert the file (uncommitted or this session's changes).
+        if self.can_revert(d) {
+            let rr = Rect::from_min_size(pos2(r.max.x - 72.0, cy - 13.0), vec2(28.0, 26.0));
+            let rresp = ui.interact(rr, id.with("revert"), Sense::click());
+            let rh = kit::hover_t(ui, &rresp);
+            ui.painter().rect_filled(
+                rr,
+                CornerRadius::same(6),
+                kit::mix(Color32::TRANSPARENT, t::HOVER(), rh),
+            );
+            kit::paint_icon(
+                ui,
+                rr.shrink2(vec2(7.0, 6.5)),
+                kit::Icon::Undo,
+                kit::mix(t::TEXT_2(), t::TEXT(), rh),
+            );
+            if rresp
+                .on_hover_text(if d.scope == DiffScope::Session {
+                    "Revert to before the agent's edits"
+                } else {
+                    "Discard these changes"
+                })
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                click = Some(RowClick::Revert(fi));
+            }
         }
 
         // Open in editor.
@@ -1322,6 +1541,8 @@ impl ReviewState {
 }
 
 enum RowClick {
+    Revert(usize),
+    RevertHunk(usize, usize),
     ToggleFold(usize),
     ToggleViewed(usize),
     Open(usize, Option<u32>),

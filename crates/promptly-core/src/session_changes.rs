@@ -157,6 +157,22 @@ pub fn diff(root: &Path, baselines: &Baselines) -> Result<ReviewDiff, String> {
     })
 }
 
+/// Put a file back as it was before the agent's first edit (deleting it
+/// if the agent created it).
+pub fn revert(path: &Path, base: &Baseline) -> Result<(), String> {
+    match base {
+        Baseline::Missing => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        },
+        Baseline::Content(bytes) => {
+            std::fs::write(path, bytes.as_slice()).map_err(|e| e.to_string())
+        }
+        Baseline::TooLarge => Err("This file is too large to restore".into()),
+    }
+}
+
 /// A private scratch folder removed on drop.
 struct TempDir(PathBuf);
 
@@ -245,5 +261,15 @@ mod tests {
         std::fs::remove_file(root.join("app.py")).unwrap();
         let d = diff(root, &base).unwrap();
         assert_eq!(d.files[0].status, FileStatus::Deleted);
+
+        // Reverting restores the original and removes what the agent created.
+        revert(&root.join("app.py"), &base[&root.join("app.py")]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("app.py")).unwrap(),
+            "a = 1\nb = 2\n"
+        );
+        revert(&root.join("new.md"), &base[&root.join("new.md")]).unwrap();
+        assert!(!root.join("new.md").exists());
+        assert!(diff(root, &base).unwrap().files.is_empty());
     }
 }

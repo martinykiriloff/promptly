@@ -355,3 +355,43 @@ pub fn card(ui: &mut egui::Ui, ask: &Ask) -> Option<CardAction> {
         });
     action
 }
+
+/// Ask `claude -p` for plain text (e.g. a commit message), blocking: call it
+/// off the UI thread.
+pub fn claude_text(launch: &Launch, system: &str, prompt: &str) -> Result<String, String> {
+    let args: Vec<String> = [
+        "-p",
+        "--model",
+        &launch.model,
+        "--output-format",
+        "json",
+        "--tools",
+        "",
+        "--no-session-persistence",
+        "--safe-mode",
+        "--settings",
+        r#"{"alwaysThinkingEnabled":false}"#,
+        "--system-prompt",
+        system,
+        prompt,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let argv = crate::app::login_shell_exec(&launch.shell, launch.binary.clone(), args);
+    let mut cmd = Command::new(&launch.shell);
+    cmd.args(argv)
+        .current_dir(&launch.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match &launch.config_dir {
+        Some(d) => cmd.env(promptly_core::accounts::CONFIG_DIR_ENV, d),
+        None => cmd.env_remove(promptly_core::accounts::CONFIG_DIR_ENV),
+    };
+    cmd.envs(launch.env.iter().map(|(k, v)| (k, v)));
+    let out = cmd
+        .output()
+        .map_err(|e| format!("Couldn't start your shell: {e}"))?;
+    nl_command::parse_print_text(&String::from_utf8_lossy(&out.stdout))
+}
