@@ -303,6 +303,10 @@ pub struct App {
     ligatures: bool,
     /// Color theme (theme::all() names).
     theme_name: String,
+    /// Shortcut overrides from Settings: action name -> spec ("" unbinds).
+    key_overrides: std::collections::BTreeMap<String, String>,
+    /// Settings > Shortcuts is waiting for keys for this action.
+    capturing: Option<&'static str>,
     /// Installed monospace families, loaded when Settings first needs them.
     mono_families: Arc<Mutex<Option<Vec<String>>>>,
     /// Name typed in the "Add account" sheet, while it is open.
@@ -329,7 +333,9 @@ pub struct App {
     control_path: Option<PathBuf>,
     ctl_path: Option<PathBuf>,
     hooks_locked: bool,
-    toast: Option<(String, Instant)>,
+    /// Notifications shown at the top, newest last: (id, text, shown at).
+    toasts: Vec<(u64, String, Instant)>,
+    toast_seq: u64,
     focus_terminal: bool,
     last_poll: Instant,
     shortcuts: Vec<(Action, KeyboardShortcut)>,
@@ -442,7 +448,7 @@ impl App {
             .and_then(|e| e.parent().map(|d| d.join("promptly-ctl")))
             .filter(|p| p.exists());
         let restore = SavedLayout::load().filter(|l| l.tabs.iter().any(|t| !t.is_empty()));
-        let shortcuts = build_shortcuts(&cfg);
+        let shortcuts = build_shortcuts(&cfg, &Default::default());
         let mut app = Self {
             font_size: cfg.font_size,
             cfg,
@@ -472,6 +478,8 @@ impl App {
             terminal_font: crate::fonts::BUILTIN.into(),
             ligatures: true,
             theme_name: theme::DEFAULT.into(),
+            key_overrides: Default::default(),
+            capturing: None,
             mono_families: Arc::default(),
             add_account: None,
             accounts_checked: Instant::now(),
@@ -493,7 +501,8 @@ impl App {
             control_path,
             hooks_locked: hooks::managed_hooks_disabled(),
             ctl_path,
-            toast: None,
+            toasts: Vec::new(),
+            toast_seq: 0,
             focus_terminal: true,
             last_poll: Instant::now() - Duration::from_secs(60),
             shortcuts,
@@ -513,6 +522,8 @@ impl App {
         app.terminal_font = prefs.terminal_font.clone();
         app.ligatures = prefs.ligatures;
         app.theme_name = theme::current().name.to_string();
+        app.key_overrides = prefs.keybindings.clone();
+        app.shortcuts = build_shortcuts(&app.cfg, &app.key_overrides);
         {
             let known = app.known_commands.clone();
             let shell = shell_integration::user_shell(app.cfg.shell.as_deref());
@@ -559,8 +570,20 @@ impl App {
         app
     }
 
+    /// Show a notification. Up to four stack; the same text isn't repeated.
     fn toast(&mut self, msg: impl Into<String>) {
-        self.toast = Some((msg.into(), Instant::now()));
+        let msg = msg.into();
+        self.toasts.retain(|t| t.1 != msg);
+        self.toast_seq += 1;
+        self.toasts.push((self.toast_seq, msg, Instant::now()));
+        if self.toasts.len() > 4 {
+            self.toasts.remove(0);
+        }
+    }
+
+    /// The newest notification's text (control API, tests).
+    fn last_toast(&self) -> Option<String> {
+        self.toasts.last().map(|t| t.1.clone())
     }
 
     fn font(&self) -> FontId {
@@ -594,6 +617,17 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         let mut cwd = req.cwd.clone().unwrap_or_else(|| self.default_cwd());
+        // A folder that no longer exists (e.g. /tmp after a restart): say
+        // so instead of silently starting somewhere else.
+        if !cwd.is_dir() {
+            let home = promptly_core::paths::home();
+            self.toast(format!(
+                "{} no longer exists; opened in {} instead",
+                short_path(&cwd.to_string_lossy()),
+                short_path(&home.to_string_lossy())
+            ));
+            cwd = home;
+        }
         let profile = self.cfg.profile_for(&cwd).cloned();
         let mut env: HashMap<String, String> = profile
             .as_ref()
@@ -621,7 +655,12 @@ impl App {
         }
         // A local model: point Claude Code at it, starting Ollama if needed.
         env.extend(account.session_env());
-        if let Some(m) = &account.local
+        if let Some(a) = account.local.as_ref().and_then(|m| m.advice())
+            && req.claude
+        {
+            self.toast(a);
+        }
+        if let Some(m) = account.local.as_ref().filter(|m| m.provider == "Ollama")
             && req.claude
         {
             match promptly_core::local_models::ensure_ollama(&m.base_url) {
@@ -1061,7 +1100,7 @@ impl App {
                 });
                 resp.reply(match id {
                     Some(id) => json!({"ok": true, "session": id}),
-                    None => json!({"ok": false, "error": self.toast.as_ref().map(|t| t.0.clone())}),
+                    None => json!({"ok": false, "error": self.last_toast()}),
                 });
             }
             ControlRequest::Notify { title, body } => {
@@ -1271,7 +1310,7 @@ impl App {
             Action::FontDown => self.font_size = (self.font_size - 1.0).max(8.0),
             Action::ReloadConfig => {
                 let (cfg, err) = Config::load();
-                self.shortcuts = build_shortcuts(&cfg);
+                self.shortcuts = build_shortcuts(&cfg, &self.key_overrides);
                 self.font_size = cfg.font_size;
                 self.cfg = cfg;
                 self.cfg_error = err;
@@ -1453,6 +1492,10 @@ impl App {
     // ------------------------------------------------------------ UI
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Settings is waiting for a new shortcut: keys go there, not here.
+        if self.capturing.is_some() {
+            return;
+        }
         let mut fired = vec![];
         ctx.input_mut(|i| {
             for (a, sc) in &self.shortcuts {
@@ -2197,6 +2240,7 @@ impl App {
             terminal_font: self.terminal_font.clone(),
             ligatures: self.ligatures,
             theme: self.theme_name.clone(),
+            keybindings: self.key_overrides.clone(),
         }
         .save();
     }
@@ -3938,36 +3982,71 @@ impl App {
         self.log_window(ctx);
         self.transcript_window(ctx);
 
-        if let Some((msg, at)) = &self.toast {
-            if at.elapsed() < Duration::from_secs(6) {
-                egui::Area::new(egui::Id::new("toast"))
-                    .anchor(egui::Align2::CENTER_TOP, [0.0, 48.0])
-                    .show(ctx, |ui| {
-                        kit::floating_frame()
-                            .corner_radius(egui::CornerRadius::same(18))
-                            .inner_margin(egui::Margin::symmetric(16, 9))
-                            .show(ui, |ui| {
+        self.toasts_ui(ctx);
+    }
+
+    /// Stacked notifications at the top. Each closes after six seconds
+    /// (longer while the pointer is on it) or with its ✕.
+    fn toasts_ui(&mut self, ctx: &egui::Context) {
+        const LIFE: Duration = Duration::from_secs(6);
+        let mut close = None;
+        let mut hovered = None;
+        if self.toasts.is_empty() {
+            return;
+        }
+        egui::Area::new(egui::Id::new("toasts"))
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 48.0])
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                for (id, msg, _) in &self.toasts {
+                    let r = kit::floating_frame()
+                        .corner_radius(egui::CornerRadius::same(14))
+                        .inner_margin(egui::Margin {
+                            left: 16,
+                            right: 6,
+                            top: 6,
+                            bottom: 6,
+                        })
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
                                 ui.label(RichText::new(msg.as_str()).color(theme::tokens::TEXT()));
+                                if kit::icon_button(ui, Icon::Close, "Dismiss", false).clicked() {
+                                    close = Some(*id);
+                                }
                             });
-                    });
-                ctx.request_repaint_after(Duration::from_secs(1));
-            } else {
-                self.toast = None;
+                        })
+                        .response;
+                    if r.contains_pointer() {
+                        hovered = Some(*id);
+                    }
+                }
+            });
+        let now = Instant::now();
+        for t in self.toasts.iter_mut() {
+            if Some(t.0) == hovered {
+                t.2 = now; // reading it: keep it up
             }
+        }
+        self.toasts
+            .retain(|t| Some(t.0) != close && t.2.elapsed() < LIFE);
+        if !self.toasts.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(500));
         }
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
         use theme::tokens as t;
         if !self.settings_open {
+            self.capturing = None; // closing Settings cancels a rebind
             return;
         }
-        const SECTIONS: [(Icon, &str); 6] = [
+        const SECTIONS: [(Icon, &str); 7] = [
             (Icon::Sparkle, "Claude"),
             (Icon::Users, "Accounts"),
             (Icon::Eye, "Appearance"),
             (Icon::Clock, "Notifications"),
             (Icon::Refresh, "Updates"),
+            (Icon::Search, "Shortcuts"),
             (Icon::Sliders, "Advanced"),
         ];
         let tab_id = egui::Id::new("settings-tab");
@@ -4107,7 +4186,13 @@ impl App {
         let mut use_id = None;
         kit::settings_group(ui, Some("On this Mac"), |ui| {
             for (i, a) in accounts.iter().enumerate() {
-                kit::setting_row(ui, i == 0, &a.label(), &a.detail(), |ui| {
+                let detail = a
+                    .local
+                    .as_ref()
+                    .and_then(|m| m.advice())
+                    .map(|adv| format!("{} · {adv}", a.detail()))
+                    .unwrap_or_else(|| a.detail());
+                kit::setting_row(ui, i == 0, &a.label(), &detail, |ui| {
                     if a.id == active {
                         kit::pill(ui, "In use", t::ACCENT_HOVER());
                     } else if kit::secondary_button(ui, None, "Use").clicked() {
@@ -4116,6 +4201,76 @@ impl App {
                 });
             }
         });
+        // Any Anthropic-compatible server (a LiteLLM proxy, a remote GPU box,
+        // LM Studio on another port...).
+        let servers = self.core.lock().servers().to_vec();
+        let mut remove = None;
+        let form_id = egui::Id::new("server-form");
+        let mut form: [String; 4] = ui.data(|d| d.get_temp(form_id)).unwrap_or_default();
+        let mut add = None;
+        kit::settings_group(ui, Some("Model servers"), |ui| {
+            for (i, sv) in servers.iter().enumerate() {
+                kit::setting_row(
+                    ui,
+                    i == 0,
+                    &format!("{} · {}", sv.name, sv.model),
+                    &sv.base_url,
+                    |ui| {
+                        if kit::secondary_button(ui, None, "Remove").clicked() {
+                            remove = Some(i);
+                        }
+                    },
+                );
+            }
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new("Add a server with an Anthropic-compatible API (Ollama and LM Studio models on this Mac are found automatically).")
+                    .size(11.5)
+                    .color(t::TEXT_3()),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                for (i, hint) in [
+                    "Name",
+                    "URL (http://host:port)",
+                    "Model",
+                    "Token (optional)",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form[i])
+                            .hint_text(*hint)
+                            .desired_width(if i == 1 { 190.0 } else { 110.0 }),
+                    );
+                }
+            });
+            ui.add_space(6.0);
+            let ok = !form[0].trim().is_empty()
+                && form[1].trim().starts_with("http")
+                && !form[2].trim().is_empty();
+            ui.add_enabled_ui(ok, |ui| {
+                if kit::secondary_button(ui, Some(Icon::Plus), "Add server").clicked() {
+                    add = Some(promptly_core::accounts::CustomServer {
+                        name: form[0].trim().into(),
+                        base_url: form[1].trim().trim_end_matches('/').into(),
+                        model: form[2].trim().into(),
+                        token: Some(form[3].trim().to_string()).filter(|t| !t.is_empty()),
+                    });
+                }
+            });
+            ui.add_space(10.0);
+        });
+        if let Some(sv) = add {
+            self.core.lock().add_server(sv);
+            form = Default::default();
+        }
+        if let Some(i) = remove {
+            self.core.lock().remove_server(i);
+        }
+        ui.data_mut(|d| d.insert_temp(form_id, form));
+
         let mut renames = vec![];
         kit::settings_group(ui, Some("Names"), |ui| {
             for (i, a) in accounts.iter().enumerate() {
@@ -4171,6 +4326,97 @@ impl App {
         }
         if let Some(id) = use_id {
             self.switch_account(&id);
+        }
+    }
+
+    /// Settings > Shortcuts: every action with its keys; click to rebind.
+    fn shortcuts_section(&mut self, ui: &mut egui::Ui) {
+        use theme::tokens as t;
+        // Waiting for keys: the next shortcut-like press is the new binding.
+        if let Some(name) = self.capturing {
+            let mut done: Option<Option<String>> = None;
+            ui.input_mut(|i| {
+                i.events.retain(|e| {
+                    let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } = e
+                    else {
+                        return true;
+                    };
+                    if *key == Key::Escape && modifiers.is_none() {
+                        done = Some(None); // cancel
+                    } else if matches!(key, Key::Backspace | Key::Delete) && modifiers.is_none() {
+                        done = Some(Some(String::new())); // unbind
+                    } else if let Some(spec) = shortcut_spec(*key, *modifiers) {
+                        done = Some(Some(spec));
+                    }
+                    false
+                });
+            });
+            if let Some(result) = done {
+                if let Some(spec) = result {
+                    self.key_overrides.insert(name.to_string(), spec);
+                    self.shortcuts = build_shortcuts(&self.cfg, &self.key_overrides);
+                    self.save_prefs();
+                }
+                self.capturing = None;
+            }
+        }
+        let mut change = None;
+        let mut reset = None;
+        kit::settings_group(ui, None, |ui| {
+            for (i, (a, name, label, _)) in ACTIONS.iter().enumerate() {
+                let keys = self.sc(*a);
+                let clash = self.shortcuts.iter().find(|(b, sc)| {
+                    b != a && self.shortcuts.iter().any(|(x, s)| x == a && s == sc)
+                });
+                let detail = match clash {
+                    Some((other, _)) => {
+                        let other = ACTIONS
+                            .iter()
+                            .find(|x| x.0 == *other)
+                            .map(|x| x.2)
+                            .unwrap_or("");
+                        format!("Same keys as \u{201c}{other}\u{201d}")
+                    }
+                    None => String::new(),
+                };
+                let capturing = self.capturing == Some(*name);
+                let custom = self.key_overrides.contains_key(*name);
+                kit::setting_row(ui, i == 0, label, &detail, |ui| {
+                    if capturing {
+                        ui.label(
+                            RichText::new("Press keys…  Esc cancels · Delete unbinds")
+                                .size(12.0)
+                                .color(t::ACCENT_HOVER()),
+                        );
+                        return;
+                    }
+                    if custom
+                        && kit::icon_button(ui, Icon::Refresh, "Reset to default", false).clicked()
+                    {
+                        reset = Some(*name);
+                    }
+                    let shown = keys.unwrap_or_else(|| "—".into());
+                    if kit::secondary_button(ui, None, &shown)
+                        .on_hover_text("Click, then press the new keys")
+                        .clicked()
+                    {
+                        change = Some(*name);
+                    }
+                });
+            }
+        });
+        if let Some(n) = change {
+            self.capturing = Some(n);
+        }
+        if let Some(n) = reset {
+            self.key_overrides.remove(n);
+            self.shortcuts = build_shortcuts(&self.cfg, &self.key_overrides);
+            self.save_prefs();
         }
     }
 
@@ -4577,6 +4823,7 @@ impl App {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
+            5 => self.shortcuts_section(ui),
             _ => {
                 let path = Config::path().to_string_lossy().to_string();
                 kit::settings_group(ui, Some("Configuration"), |ui| {
@@ -5462,6 +5709,7 @@ struct Prefs {
     terminal_font: String,
     ligatures: bool,
     theme: String,
+    keybindings: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Prefs {
@@ -5479,6 +5727,7 @@ impl Default for Prefs {
             terminal_font: crate::fonts::BUILTIN.into(),
             ligatures: true,
             theme: theme::DEFAULT.into(),
+            keybindings: Default::default(),
         }
     }
 }
@@ -5868,14 +6117,52 @@ fn parse_key(k: &str) -> Option<Key> {
     })
 }
 
-fn build_shortcuts(cfg: &Config) -> Vec<(Action, KeyboardShortcut)> {
+/// Shortcuts: Settings overrides, then the config file, then defaults.
+fn build_shortcuts(
+    cfg: &Config,
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> Vec<(Action, KeyboardShortcut)> {
     ACTIONS
         .iter()
         .filter_map(|(a, name, _, default)| {
-            let spec = cfg.binding(name).unwrap_or(default);
+            let spec = overrides
+                .get(*name)
+                .map(String::as_str)
+                .or_else(|| cfg.binding(name))
+                .unwrap_or(default);
             parse_shortcut(spec).map(|s| (*a, s))
         })
         .collect()
+}
+
+/// A captured key press as a shortcut spec ("cmd+shift+k"), or None for a
+/// press that can't be a shortcut (no modifier on a letter, digit or symbol).
+fn shortcut_spec(key: Key, m: Modifiers) -> Option<String> {
+    let mut parts = vec![];
+    if cfg!(target_os = "macos") {
+        if m.mac_cmd || m.command {
+            parts.push("cmd");
+        }
+        if m.ctrl {
+            parts.push("ctrl");
+        }
+    } else if m.ctrl || m.command {
+        parts.push("ctrl");
+    }
+    if m.alt {
+        parts.push("alt");
+    }
+    if m.shift {
+        parts.push("shift");
+    }
+    let name = key.name().to_ascii_lowercase();
+    let is_fkey =
+        name.starts_with('f') && name.len() > 1 && name[1..].chars().all(|c| c.is_ascii_digit());
+    if (parts.is_empty() || parts == ["shift"]) && !is_fkey {
+        return None; // plain typing keys stay typing keys
+    }
+    parts.push(&name);
+    Some(parts.join("+"))
 }
 
 #[cfg(test)]
@@ -5907,7 +6194,7 @@ mod tests {
     #[test]
     fn default_shortcuts_are_unique() {
         let cfg = Config::default();
-        let s = build_shortcuts(&cfg);
+        let s = build_shortcuts(&cfg, &Default::default());
         for (i, (a, x)) in s.iter().enumerate() {
             for (b, y) in &s[i + 1..] {
                 assert!(
@@ -5916,5 +6203,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn settings_overrides_win_and_can_unbind() {
+        let mut cfg = Config::default();
+        cfg.keybindings
+            .insert("new_shell".into(), "cmd+shift+t".into());
+        let mut ov = std::collections::BTreeMap::new();
+        ov.insert("new_shell".to_string(), "cmd+alt+t".to_string());
+        ov.insert("palette".to_string(), String::new());
+        let s = build_shortcuts(&cfg, &ov);
+        let find = |a: Action| s.iter().find(|(x, _)| *x == a).map(|(_, k)| *k);
+        let shell = find(Action::NewShell).expect("bound");
+        assert!(
+            shell.modifiers.alt && shell.logical_key == Key::T,
+            "override beats config"
+        );
+        assert!(find(Action::Palette).is_none(), "empty override unbinds");
+        assert!(find(Action::NewClaude).is_some(), "others keep defaults");
+    }
+
+    #[test]
+    fn captured_keys_become_specs() {
+        let cmd = Modifiers {
+            command: true,
+            mac_cmd: cfg!(target_os = "macos"),
+            ..Default::default()
+        };
+        let cmd_shift = Modifiers { shift: true, ..cmd };
+        let spec = shortcut_spec(Key::K, cmd_shift).unwrap();
+        let back = parse_shortcut(&spec).unwrap();
+        assert_eq!(back.logical_key, Key::K);
+        assert!(back.modifiers.shift && back.modifiers.command, "{spec}");
+        assert_eq!(
+            shortcut_spec(Key::K, Modifiers::NONE),
+            None,
+            "plain letters stay typing"
+        );
+        assert_eq!(shortcut_spec(Key::K, Modifiers::SHIFT), None);
+        assert!(
+            shortcut_spec(Key::F5, Modifiers::NONE).is_some(),
+            "function keys alone are fine"
+        );
+        assert_eq!(
+            parse_shortcut(&shortcut_spec(Key::Comma, cmd).unwrap())
+                .unwrap()
+                .logical_key,
+            Key::Comma
+        );
     }
 }

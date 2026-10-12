@@ -214,7 +214,19 @@ impl Core {
         let inherited = crate::INHERITED_CONFIG_DIR.get().map(PathBuf::as_path);
         let home = promptly_core::paths::home();
         self.accounts = accounts::discover(&home, &self.accounts_file, inherited);
-        for m in &self.local {
+        let servers =
+            self.accounts_file
+                .servers
+                .iter()
+                .map(|c| promptly_core::accounts::LocalModel {
+                    provider: c.name.clone(),
+                    base_url: c.base_url.clone(),
+                    model: c.model.clone(),
+                    token: c.token.clone(),
+                    context: None,
+                });
+        let all: Vec<_> = self.local.iter().cloned().chain(servers).collect();
+        for m in &all {
             let mut a = Account::local(m.clone(), &home);
             a.name = self.accounts_file.names.get(&a.id).cloned();
             self.accounts.push(a);
@@ -234,6 +246,28 @@ impl Core {
         self.local = models;
         self.refresh_accounts();
         true
+    }
+
+    /// Model servers added in Settings.
+    pub fn servers(&self) -> &[promptly_core::accounts::CustomServer] {
+        &self.accounts_file.servers
+    }
+
+    pub fn add_server(&mut self, s: promptly_core::accounts::CustomServer) {
+        self.accounts_file
+            .servers
+            .retain(|x| !(x.name == s.name && x.model == s.model));
+        self.accounts_file.servers.push(s);
+        self.accounts_file.save();
+        self.refresh_accounts();
+    }
+
+    pub fn remove_server(&mut self, index: usize) {
+        if index < self.accounts_file.servers.len() {
+            self.accounts_file.servers.remove(index);
+            self.accounts_file.save();
+            self.refresh_accounts();
+        }
     }
 
     pub fn account(&self, id: &str) -> Option<&Account> {

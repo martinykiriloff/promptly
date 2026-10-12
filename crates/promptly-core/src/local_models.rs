@@ -40,14 +40,30 @@ fn base_from(host: Option<&str>) -> String {
 
 /// Minimal HTTP GET for a localhost JSON endpoint; `None` when unreachable.
 fn get(base: &str, path: &str, timeout: Duration) -> Option<String> {
+    request(base, "GET", path, None, timeout)
+}
+
+fn post(base: &str, path: &str, body: &str, timeout: Duration) -> Option<String> {
+    request(base, "POST", path, Some(body), timeout)
+}
+
+fn request(
+    base: &str,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    timeout: Duration,
+) -> Option<String> {
     let hostport = base.trim_start_matches("http://");
     let addr = hostport.to_socket_addrs().ok()?.next()?;
     let mut s = TcpStream::connect_timeout(&addr, timeout).ok()?;
     s.set_read_timeout(Some(timeout)).ok()?;
     s.set_write_timeout(Some(timeout)).ok()?;
+    let body = body.unwrap_or("");
     write!(
         s,
-        "GET {path} HTTP/1.0\r\nHost: {hostport}\r\nAccept: application/json\r\n\r\n"
+        "{method} {path} HTTP/1.0\r\nHost: {hostport}\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
     )
     .ok()?;
     let mut buf = Vec::new();
@@ -146,23 +162,73 @@ pub fn ollama_binary() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Every local model available: from the running server, or from Ollama's
-/// model folder when it is installed but stopped.
+/// LM Studio's local server.
+pub const LMSTUDIO_BASE: &str = "http://127.0.0.1:1234";
+
+/// A model's context window from Ollama's `/api/show` (`<arch>.context_length`).
+fn ollama_context(base: &str, model: &str) -> Option<u32> {
+    let body = serde_json::json!({ "model": model }).to_string();
+    let json = post(base, "/api/show", &body, Duration::from_millis(800))?;
+    context_from_show(&json)
+}
+
+fn context_from_show(json: &str) -> Option<u32> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    v["model_info"]
+        .as_object()?
+        .iter()
+        .find(|(k, _)| k.ends_with(".context_length"))
+        .and_then(|(_, n)| n.as_u64())
+        .map(|n| n as u32)
+}
+
+/// Model ids from an OpenAI-style `/v1/models` (LM Studio).
+fn models_from_v1(json: &str) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+    let mut out: Vec<String> = v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["id"].as_str().map(str::to_owned))
+        .filter(|n| !n.contains("embed"))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Every local model available: Ollama's (from the running server, or its
+/// model folder when it is installed but stopped) and LM Studio's when its
+/// server is running.
 pub fn discover() -> Vec<LocalModel> {
     let base = ollama_base();
-    let names = match get(&base, "/api/tags", Duration::from_millis(400)) {
-        Some(json) => models_from_tags(&json),
-        None if ollama_binary().is_some() => models_on_disk(&ollama_models_dir()),
-        None => vec![],
+    let mut out = vec![];
+    let (names, running) = match get(&base, "/api/tags", Duration::from_millis(400)) {
+        Some(json) => (models_from_tags(&json), true),
+        None if ollama_binary().is_some() => (models_on_disk(&ollama_models_dir()), false),
+        None => (vec![], false),
     };
-    names
-        .into_iter()
-        .map(|model| LocalModel {
+    for model in names {
+        let context = running.then(|| ollama_context(&base, &model)).flatten();
+        out.push(LocalModel {
             provider: "Ollama".into(),
             base_url: base.clone(),
             model,
-        })
-        .collect()
+            token: None,
+            context,
+        });
+    }
+    if let Some(json) = get(LMSTUDIO_BASE, "/v1/models", Duration::from_millis(300)) {
+        for model in models_from_v1(&json) {
+            out.push(LocalModel {
+                provider: "LM Studio".into(),
+                base_url: LMSTUDIO_BASE.into(),
+                model,
+                token: None,
+                context: None,
+            });
+        }
+    }
+    out
 }
 
 /// Make sure Ollama is serving, starting it (with a context window large
@@ -232,6 +298,30 @@ mod tests {
     }
 
     #[test]
+    fn context_and_lmstudio_parsing() {
+        let show =
+            r#"{"model_info":{"general.architecture":"qwen3","qwen3.context_length":40960}}"#;
+        assert_eq!(context_from_show(show), Some(40960));
+        assert_eq!(context_from_show("{}"), None);
+        let v1 = r#"{"data":[{"id":"qwen2.5-coder-14b"},{"id":"text-embedding-nomic"}]}"#;
+        assert_eq!(models_from_v1(v1), ["qwen2.5-coder-14b"]);
+        let m = LocalModel {
+            provider: "Ollama".into(),
+            base_url: "x".into(),
+            model: "qwen3:8b".into(),
+            token: None,
+            context: Some(40960),
+        };
+        assert!(m.advice().unwrap().contains("40k context"));
+        let big = LocalModel {
+            context: Some(262_144),
+            ..m.clone()
+        };
+        assert_eq!(big.advice(), None);
+        assert_eq!(LocalModel { context: None, ..m }.advice(), None);
+    }
+
+    #[test]
     fn local_account_env() {
         use crate::accounts::Account;
         let home = Path::new("/home/me");
@@ -240,6 +330,8 @@ mod tests {
                 provider: "Ollama".into(),
                 base_url: "http://127.0.0.1:11434".into(),
                 model: "qwen3:8b".into(),
+                token: Some("secret".into()),
+                context: None,
             },
             home,
         );
@@ -250,6 +342,10 @@ mod tests {
         let env: std::collections::HashMap<_, _> = a.session_env().into_iter().collect();
         assert_eq!(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:11434");
         assert_eq!(env["ANTHROPIC_API_KEY"], "");
+        assert_eq!(
+            env["ANTHROPIC_AUTH_TOKEN"], "secret",
+            "a server token is used"
+        );
         assert_eq!(env["ANTHROPIC_MODEL"], "qwen3:8b");
         assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "qwen3:8b");
     }

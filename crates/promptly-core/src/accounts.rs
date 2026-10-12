@@ -44,6 +44,37 @@ pub struct LocalModel {
     pub base_url: String,
     /// e.g. `qwen3:8b`.
     pub model: String,
+    /// API token for the server (Ollama and LM Studio accept any).
+    pub token: Option<String>,
+    /// The model's context window in tokens, when the server reports it.
+    pub context: Option<u32>,
+}
+
+/// Claude Code's system prompt and tools take about 30k tokens.
+pub const CLAUDE_CODE_CONTEXT: u32 = 32_768;
+
+impl LocalModel {
+    /// Advice when the model is a poor fit for Claude Code, else None.
+    pub fn advice(&self) -> Option<String> {
+        let ctx = self.context?;
+        (ctx < 2 * CLAUDE_CODE_CONTEXT).then(|| {
+            format!(
+                "{} has a {}k context. Claude Code needs about 30k of it, so expect weak results; a coding model with 64k+ (qwen3-coder, devstral, gpt-oss) works better.",
+                self.model,
+                ctx / 1024
+            )
+        })
+    }
+}
+
+/// A model server added by hand in Settings (any Anthropic-compatible API).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomServer {
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 impl Account {
@@ -99,7 +130,10 @@ impl Account {
             // Small local models do better without extended thinking.
             ("MAX_THINKING_TOKENS".into(), "0".into()),
             ("ANTHROPIC_BASE_URL".into(), m.base_url.clone()),
-            ("ANTHROPIC_AUTH_TOKEN".into(), m.provider.to_lowercase()),
+            (
+                "ANTHROPIC_AUTH_TOKEN".into(),
+                m.token.clone().unwrap_or_else(|| m.provider.to_lowercase()),
+            ),
             // An inherited API key would win over the local server.
             ("ANTHROPIC_API_KEY".into(), String::new()),
         ];
@@ -184,7 +218,10 @@ impl Account {
     /// Secondary line in the switcher: organization or folder.
     pub fn detail(&self) -> String {
         if let Some(m) = &self.local {
-            return format!("{} · runs on this Mac", m.provider);
+            return match m.context {
+                Some(c) => format!("{} · {}k context", m.provider, c / 1024),
+                None => format!("{} · runs on this Mac", m.provider),
+            };
         }
         match (&self.org, self.signed_in()) {
             (Some(o), _) => format!("{o} · {}", self.tilde_dir()),
@@ -248,6 +285,9 @@ pub struct AccountsFile {
     /// The account new sessions use.
     #[serde(default)]
     pub active: Option<String>,
+    /// Model servers added in Settings.
+    #[serde(default)]
+    pub servers: Vec<CustomServer>,
 }
 
 impl AccountsFile {
