@@ -11,7 +11,7 @@ env:
 
 jobs:
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       # Developer ID signing and notarization run only when these secrets
       # exist; without them the build is unsigned, as before.
