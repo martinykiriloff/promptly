@@ -11,8 +11,11 @@ env:
 
 jobs:
   macos:
-    runs-on: macos-15
+    # Intel runner cross-compiling for Apple silicon: arm64 runners are often
+    # unavailable for long stretches.
+    runs-on: macos-15-intel
     env:
+      TARGET: aarch64-apple-darwin
       # Developer ID signing and notarization run only when these secrets
       # exist; without them the build is unsigned, as before.
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
@@ -24,6 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - name: Signing keychain (Developer ID)
         if: env.MACOS_CERT_P12 != '' && env.MACOS_SIGN_IDENTITY != ''

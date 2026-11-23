@@ -2,14 +2,21 @@
 # Build Promptly.app (Apple silicon). Signing/notarization run only when the
 # identity env vars are set, so local builds stay unsigned.
 #   APPLE_SIGN_IDENTITY="Developer ID Application: ..."  NOTARY_PROFILE=promptly ./scripts/bundle-macos.sh
+# TARGET=aarch64-apple-darwin cross-compiles (e.g. from an Intel machine).
 set -eu
 cd "$(dirname "$0")/.."
-cargo build --release --workspace
+if [ -n "${TARGET:-}" ]; then
+  cargo build --release --workspace --target "$TARGET"
+  BIN=target/$TARGET/release
+else
+  cargo build --release --workspace
+  BIN=target/release
+fi
 VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys;print([p for p in json.load(sys.stdin)["packages"] if p["name"]=="promptly"][0]["version"])')
 APP=target/release/Promptly.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/promptly target/release/promptly-ctl "$APP/Contents/MacOS/"
+cp "$BIN/promptly" "$BIN/promptly-ctl" "$APP/Contents/MacOS/"
 sed "s/__VERSION__/$VERSION/g" packaging/Info.plist > "$APP/Contents/Info.plist"
 cp packaging/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 if [ -n "${APPLE_SIGN_IDENTITY:-}" ]; then
